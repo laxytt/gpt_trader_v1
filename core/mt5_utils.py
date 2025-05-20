@@ -157,3 +157,17 @@ def get_current_open_position():
         "tp": pos.tp,
         "ticket": pos.ticket
     }
+
+def prefilter_instruments(symbols, min_atr=0.0003, min_volume=200):
+    filtered = []
+    for symbol in symbols:
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 20)
+        if rates is None or len(rates) < 15:
+            continue
+        df = pd.DataFrame(rates)
+        atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
+        last_vol = df['tick_volume'].iloc[-1]
+        # Add more filters if needed (spread, price change, etc.)
+        if atr >= min_atr and last_vol >= min_volume:
+            filtered.append(symbol)
+    return filtered

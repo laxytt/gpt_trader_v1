@@ -8,11 +8,9 @@ import tiktoken
 from mt5_data import get_recent_candle_history_and_chart
 
 from core.news_utils import get_upcoming_news
-from core.paths import COMPLETED_TRADES_FILE
 from core.rag_memory import TradeMemoryRAG
 from core.utils import (encode_image_as_b64, get_market_session,
-                        get_volatility_context, get_win_loss_streak)
-from core.telegram_logger import TelegramLogger
+                        get_volatility_context, get_win_loss_streak, np_encoder)
 
 client = openai.OpenAI()  
 memory = TradeMemoryRAG()
@@ -30,52 +28,60 @@ You are given:
 
 # VSA Pattern Characteristics and Signal Examples
 
-- Always start from higher timeframe (H1) to analyze trend, accumulation, or distribution.
-- Never trade against the H1 trend or without clear context.
-- Analyze volume in relation to price: strong volume with price movement indicates strength; falling volume in trend may signal weakness or reversal.
-- Look for confirmation: Never act on a single signal, wait for supporting evidence (e.g., candle shape, sequence, background).
-- Bar types:
-    - UpBar: Close above prior bar.
-    - DownBar: Close below prior bar.
-    - Wide/Narrow spread: Compare with prior bars.
-- Candle + Volume Examples:
-    - Stopping Volume: Large volume after downtrend, followed by UpBar or two-bar reversal.
-    - Backholding: Narrow spread, very high volume after clear decline, potential reversal.
-    - Selling Climax: Wide spread down bar, huge volume, close mid-bar.
-    - No Supply: DownBar, very low volume (pink), confirmation by UpBar and volume rise.
-    - No Demand: UpBar, low volume, lack of buying, confirmation by DownBar.
-    - UpThrust: UpBar, high volume, long upper wick, close at/near low.
-    - Supply Coming In: High volume, long upper wick, close mid-bar, context of resistance.
-    - Trap Up Move: UpBar, very high volume, close near low, long upper wick, after a false breakout.
-    - Test: Narrow/medium bar, low volume, lower wick, confirmation by UpBar with higher volume.
-- Sequences: Always favor signal sequences (test + confirmation), not isolated bars.
-- Formations: Use additional candlestick formations (Hammer, Engulfing, etc.) only as confirmation if supported by volume/context.
-- NEVER open a trade based on one bar, one timeframe, or without volume confirmation.
-- WAIT if context, volume, or confirmation are missing or ambiguous.
+- **Cause & Effect:** Every move has a cause; be objective, not emotional. Observe which side (demand or supply) is driving the market.
+- **Effort & Result:** Price action must be analyzed in the context of volume (effort) and resulting price change (result).
+- **Volume as Market Energy:** Volume is the market's "energy". Colors: Green (bullish/up bar), Red (bearish/down bar), Pink (volume less than prior two bars).
+- **Bar/Candle Types:** UpBar = close > previous, DownBar = close < previous. Analyze wide/narrow spreads in context.
+- **Volume & Spread Analysis:** Wide or narrow spread, compared to previous candles, is critical for reading market intent.
+- **Signal Sequences:** Never trade on a single bar or unconfirmed signal. Always look for a *sequence* of signals (e.g., test + confirmation).
+- **Confirmation:** Strong signals require confirmation—by volume, by subsequent bars, or by background context.
+- **Background (Tło):** Always start from higher timeframes (H1). Assess trend, accumulation/distribution, and context before entering.
+- **Smart Money & Market Cycles:** Watch for actions of large players (Smart Money), typically seen in accumulation/distribution phases. Higher timeframe context is always dominant.
 
-**RULES:**
-- Always analyze H1 history for background/context: trend, accumulation/distribution.
-- Only look for entries on M5 **if the H1 background agrees**.
+## Key VSA Signal Types (Pattern Triggers)
+
+- **Stopping Volume:** After a decline, very high volume down bar, then up bar or two-bar reversal. Confirm with volume and next bars.
+- **Backholding:** Narrow spread after a sharp decline, with exceptionally high volume—may indicate trend reversal.
+- **Selling Climax:** Wide spread down bar, huge volume, close mid-bar, signals possible end of sell-off.
+- **No Supply:** DownBar with very low/pink volume, confirmed by UpBar and volume rise. Context: after prior demand signals.
+- **No Demand:** UpBar with low volume, less than two prior bars; confirmation by DownBar. Indicates weak buying interest.
+- **Upthrust:** Candle with upper shadow, close in lower third, often high volume. Indicates supply overcoming demand, especially after up move.
+- **Supply Coming In:** High volume, long upper wick, close mid-bar—signals possible top, especially after uptrend.
+- **Trap Up Move:** UpBar with high volume, closes near low, long upper wick, often after false breakout. Confirmed by subsequent weakness.
+- **Test:** Narrow/medium bar, low volume, lower wick; must be confirmed by UpBar with higher volume. Only valid after prior accumulation or demand signals.
+- **TwoBar Reversal:** First bar (down), second bar (up), second closes above open of first, with higher green volume.
+- **Shakeout:** Sudden drop, wide spread, closes in upper third, high volume—often signals washout before reversal.
+
+## VSA Entry Logic
+
+- Always analyze higher timeframe first (H1): Is market trending, accumulating, or distributing?
+- Entry only if M5 and H1 context agree (trend, structure).
 - Confirm any trade with at least two types of evidence (e.g., volume + candle, volume + trend).
-- Never act on a single-bar signal without confirmation.
+- Never act on single-bar or single-timeframe signals.
+- Entry triggers:
+    - After a clear sequence: e.g., stopping volume + up bar, no supply + confirmation, two-bar reversal with correct volume context, etc.
+    - Volume must confirm price action.
+    - Stop loss below/above confirming bar or setup.
+    - Prefer entry immediately after confirmation bar; skip if context changes.
+- Never trade against the trend; do not try to catch falling knives or tops in strong trends.
+- Risk/Reward must be >= 2.0. Always include stop loss.
+
+## Risk & FTMO Account Protection
+
 - WAIT if context is ambiguous, ATR is low, or signals conflict.
 - Never trade if high-impact macro news is due within 2 minutes (WAIT).
-- BUY only after strong bullish VSA (Stopping Volume, Backholding, Selling Climax, confirmed Test/Spring) **plus confirmation**.
-- SELL only after strong bearish VSA (No Demand, UpThrust, Supply Coming In, Buying Climax, Trap Up Move, failed Test) **plus confirmation**.
-- Risk/Reward must be >= 2.0. SL just beyond confirming bar.
-- WAIT if signal/context is unclear or conflicting.
+- Do not enter if worst-case loss could breach $90,000 account limit. If open trades risk breaching, WAIT or CLOSE NOW.
+- If in doubt, WAIT. No position is also a position.
 
-**Always explain your rationale. Use the format:**
-"Detected [VSA pattern] at [bar/timeframe]. Confirmation: [X]. Background: [Y]."
-Do not invent signals.
+## Output Instructions
 
-# Account Protection Rule (FTMO Challenge)
-- NEVER open a new trade if the account balance or equity could fall below $90,000 due to trade risk.
-- If currently open trades are at risk of breaching the max loss, CLOSE NOW or WAIT.
-- Your #1 priority is always to keep the account above $90,000. If in doubt, WAIT.
-- Only output BUY/SELL if the worst-case loss (SL) does NOT risk breaching this threshold.
+- Always explain rationale, referencing detected VSA pattern, confirmation, and background.
+- Do NOT invent signals.
 
-**Output JSON only:**
+**IMPORTANT:**  
+- Always return ALL of these keys in your SINGLE JSON: `symbol`, `signal`, `entry`, `sl`, `tp`, `rr`, `risk_class`, `reason`—even if some values are null.
+- `symbol` must be `"EURUSD"`.
+- If you do not detect a valid setup, return `"signal": "WAIT"` and set all other keys except `reason` and `risk_class` to null.
 
 {
   "symbol": "EURUSD",
@@ -88,9 +94,7 @@ Do not invent signals.
   "reason": "Short rationale, e.g., 'Stopping Volume on M5 at support, confirmed by up bar and rising volume; H1 trend up.'"
 }
 
-**Examples:**
-
-BUY:
+**Example BUY:**
 {
   "symbol": "EURUSD",
   "signal": "BUY",
@@ -102,7 +106,7 @@ BUY:
   "reason": "Stopping Volume detected on M5 after downtrend, confirmed by up bar with increased volume; H1 trend up, no high-impact news."
 }
 
-SELL:
+**Example SELL:**
 {
   "symbol": "EURUSD",
   "signal": "SELL",
@@ -114,7 +118,7 @@ SELL:
   "reason": "UpThrust on M5 after uptrend, confirmed by high volume and down bar; H1 trend down, no high-impact news."
 }
 
-WAIT:
+**Example WAIT:**
 {
   "symbol": "EURUSD",
   "signal": "WAIT",
@@ -126,6 +130,7 @@ WAIT:
   "reason": "Volume low, context mixed, or high-impact macro news in 1 minute."
 }
 """
+
 
 
 
@@ -285,10 +290,10 @@ def ask_gpt_for_signal():
     prompt_data["upcoming_news"] = get_upcoming_news(within_minutes=2880)
 
     # Prepare JSON structure for GPT input (includes both histories)
-    prompt_json = json.dumps(prompt_data, indent=2)
+    prompt_json = json.dumps(prompt_data, indent=2, default=np_encoder)
 
     # print("📤 Sending visual + indicator data + news to GPT...", prompt_json)
-    print("📤 Sending visual + indicator data + news to GPT...")
+    print("📤 Sending visual + indicator data + news to GPT...", prompt_json)
 
     # Build multimodal GPT input
     message_content = [
@@ -316,9 +321,10 @@ def ask_gpt_for_signal():
 def ask_gpt_for_reflection(trade):
     """
     Requests a GPT review of a completed trade, with both M5 and H1 histories for richer context.
+    Returns the trade dict with an added "reflection" field.
     """
     # Load both histories for context
-    recent = get_recent_candle_history_and_chart(symbol=trade.get("symbol", "EURUSD"))
+    recent = get_recent_candle_history_and_chart(symbol=trade.get("symbol", "EURUSD"), bars_json=20, bars_chart=80)
     history_m5 = recent.get("history_m5", [])
     history_h1 = recent.get("history_h1", [])
 
@@ -354,7 +360,5 @@ Respond in one paragraph.
     msg = response.choices[0].message.content.strip()
     trade["reflection"] = msg
     print("🪞 Reflection:", msg)
-
-    # Optionally re-log the trade with reflection
-    with open(COMPLETED_TRADES_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(trade) + "\n")
+    
+    return trade

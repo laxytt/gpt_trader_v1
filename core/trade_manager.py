@@ -6,7 +6,7 @@ import MetaTrader5 as mt5
 from core.gpt_interface import ask_gpt_for_reflection
 from core.logger import append_trade_to_file
 from core.paths import COMPLETED_TRADES_FILE, OPEN_TRADE_FILE
-from core.utils import format_trade_case, get_market_session, get_volatility_context, get_win_loss_streak
+from core.utils import format_trade_case, get_market_session, get_volatility_context, get_win_loss_streak, np_encoder
 from mt5_data import get_recent_candle_history_and_chart
 from mt5_utils import ensure_mt5_initialized
 from core.news_utils import get_upcoming_news
@@ -113,10 +113,10 @@ def log_closed_trade(trade, result):
     trade["closed"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     trade["result"] = result
 
-    # 1. Always log to your completed trades file
-    append_trade_to_file(trade, COMPLETED_TRADES_FILE)
+    trade_with_reflection = ask_gpt_for_reflection(trade)
+    append_trade_to_file(trade_with_reflection, COMPLETED_TRADES_FILE)
 
-    # 2. Try to enrich with last_signal.json if available
+    # Use the enriched trade for the case
     last_signal = None
     if os.path.exists("last_signal.json"):
         try:
@@ -125,14 +125,13 @@ def log_closed_trade(trade, result):
         except Exception as e:
             print("⚠️ Could not load last_signal.json:", e)
 
-    # 3. Always log to RAG/case memory—enriched if possible, fallback to trade info
     try:
-        case = format_trade_case(trade, result, last_signal)
+        # Use trade_with_reflection here, not the original trade!
+        case = format_trade_case(trade_with_reflection, result, last_signal)
         memory.add_case(case)
         print("📚 Logged trade case to memory.")
     except Exception as e:
         print("⚠️ Could not log case to memory:", e)
-
 
 
 def update_drawdown(trade):
@@ -298,7 +297,8 @@ def ask_gpt_for_trade_management(trade):
         }
     }
 
-    prompt_json = json.dumps(payload, indent=2)
+    prompt_json = json.dumps(payload, indent=2, default=np_encoder)
+
 
     response = client.chat.completions.create(
         model="gpt-4.1-2025-04-14",
@@ -398,7 +398,6 @@ def manage_active_trade(trade):
         print("⏱️ Trade exceeded max open time. Closing now.")
         close_position_now(trade)
         log_closed_trade(trade, "timeout_close")
-        ask_gpt_for_reflection(trade)
         clear_open_trade()
         return
 
@@ -426,7 +425,7 @@ def manage_active_trade(trade):
         print("❌ GPT: Closing trade immediately.")
         close_position_now(trade)
         log_closed_trade(trade, "GPT_close")
-        ask_gpt_for_reflection(trade)
+        
         clear_open_trade()
 
     elif decision == "SCALE_IN":

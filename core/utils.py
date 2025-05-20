@@ -2,6 +2,7 @@ import base64
 from datetime import datetime, timezone
 import os
 import time
+import numpy as np
 
 from core.paths import COMPLETED_TRADES_FILE
 
@@ -116,3 +117,15 @@ def format_trade_case(trade, result, last_signal=None):
             "timestamp": trade.get("closed", trade.get("timestamp", "")),
             "id": f"{trade.get('timestamp','')}_{trade.get('entry','')}"
         }
+
+
+def np_encoder(obj):
+    if isinstance(obj, (np.integer, np.int_, np.intc, np.intp, np.int8,
+                        np.int16, np.int32, np.int64, np.uint8,
+                        np.uint16, np.uint32, np.uint64)):
+        return int(obj)
+    elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    return str(obj)

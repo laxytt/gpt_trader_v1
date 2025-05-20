@@ -101,17 +101,18 @@ def trigger_and_get_screenshot(symbol, tf, screenshots_dir="D:/gpt_trader_v1/scr
 
 
 
-def get_recent_candle_history_and_chart(symbol="EURUSD", bars=20):
-    # Always get a list of dicts
-    candles_m5 = get_candle_history_with_indicators(symbol, mt5.TIMEFRAME_M5, bars)
-    candles_h1 = get_candle_history_with_indicators(symbol, mt5.TIMEFRAME_H1, 20)
+def get_recent_candle_history_and_chart(symbol="EURUSD", bars_json=20, bars_chart=80):
+    """
+    Returns both a wide screenshot for VSA context and lean JSON for GPT input.
+    - bars_chart: bars for chart/screenshot (visual context)
+    - bars_json: bars for GPT JSON payload (API cost control)
+    """
+    # Fetch enough bars for charting (use bars_chart)
+    candles_m5_full = get_candle_history_with_indicators(symbol, mt5.TIMEFRAME_M5, bars=bars_chart)
+    candles_h1_full = get_candle_history_with_indicators(symbol, mt5.TIMEFRAME_H1, bars=bars_chart)
 
-    # Defensive: convert to DataFrame for charting, but keep original lists for output
-    df_m5 = pd.DataFrame(candles_m5)
-    df_h1 = pd.DataFrame(candles_h1)
-
-    # Check for data presence BEFORE charting!
-    if df_m5.empty or df_h1.empty:
+    # Defensive: Check for data presence BEFORE charting!
+    if not candles_m5_full or not candles_h1_full:
         print("❌ Candle data is empty after fetch! Check MT5 connection or symbol/timeframe.")
         return {
             "symbol": symbol,
@@ -122,7 +123,15 @@ def get_recent_candle_history_and_chart(symbol="EURUSD", bars=20):
             "error": "Missing or empty candle data"
         }
 
-    # Set index for mplfinance
+    # Slice just the last bars_json for GPT (if too short, use as many as available)
+    candles_m5_json = candles_m5_full[-bars_json:] if len(candles_m5_full) >= bars_json else candles_m5_full
+    candles_h1_json = candles_h1_full[-bars_json:] if len(candles_h1_full) >= bars_json else candles_h1_full
+
+    # For chart: use all bars fetched (bars_chart)
+    df_m5 = pd.DataFrame(candles_m5_full)
+    df_h1 = pd.DataFrame(candles_h1_full)
+
+    # Set index for mplfinance if needed
     if "timestamp" in df_m5.columns and not isinstance(df_m5.index, pd.DatetimeIndex):
         df_m5.index = pd.to_datetime(df_m5["timestamp"])
     if "timestamp" in df_h1.columns and not isinstance(df_h1.index, pd.DatetimeIndex):
@@ -135,8 +144,8 @@ def get_recent_candle_history_and_chart(symbol="EURUSD", bars=20):
 
     return {
         "symbol": symbol,
-        "history_m5": candles_m5,     # original list of dicts for GPT
-        "history_h1": candles_h1,
+        "history_m5": candles_m5_json,  # Only last N for GPT
+        "history_h1": candles_h1_json,
         "screenshot_m5": chart_path_m5,
         "screenshot_h1": chart_path_h1,
     }

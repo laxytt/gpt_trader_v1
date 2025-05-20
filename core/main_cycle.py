@@ -76,8 +76,14 @@ def main_cycle():
             return
         
         print(f"📈 GPT suggested signal: {signal}")
-        # Place the trade
+
+        # After receiving `signal` from ask_gpt_for_signal()
+        if not signal or "signal" not in signal or "symbol" not in signal:
+            print("⚠️ GPT signal missing required keys! Raw output:", signal)
+            # Optionally send WAIT or log an error
+            return
         trade_result = open_trade_in_mt5(signal)
+
         if trade_result and getattr(trade_result, "retcode", None) == 10009:
             print("✅ Trade opened successfully.")
             # Save new trade status

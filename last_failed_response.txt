@@ -1,0 +1,17 @@
+{
+  "signal": "WAIT",
+  "reason": "Although M5 is above EMA50 and RSI is rising, the very last candle is a low volume doji with no clear follow-through, and ATR is low. H1 shows the up move but no volume spike or VSA confirmation like stopping volume, test, or two-bar reversal; therefore, VSA confirmation is lacking and context is not strong enough for entry."
+}
+
+---
+
+{
+  "symbol": "EURUSD",
+  "signal": "WAIT",
+  "entry": null,
+  "sl": null,
+  "tp": null,
+  "rr": null,
+  "risk_class": "C",
+  "reason": "Price is above EMA50 and RSI is rising on M5, but last bar is a doji with extremely low volume and no VSA signal sequence or clear confirmation. H1 trend is up but lacks VSA confirmation (e.g., stopping volume, test, or two-bar reversal). ATR remains low, so no valid setup is present."
+}
