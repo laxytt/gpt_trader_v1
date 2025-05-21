@@ -2,8 +2,10 @@ import base64
 from datetime import datetime, timezone
 import os
 import time
+from core.trade_status import save_all_open_trades
 import numpy as np
 from core.rag_memory import TradeMemoryRAG
+import MetaTrader5 as mt5
 
 from core.paths import COMPLETED_TRADES_FILE
 
@@ -154,3 +156,51 @@ def np_encoder(obj):
     elif isinstance(obj, (np.ndarray,)):
         return obj.tolist()
     return str(obj)
+
+def sync_open_trades_from_mt5():
+    """Sync all open MT5 positions into open_trades.json for management."""
+    if not mt5.initialize():
+        print("❌ Could not initialize MT5 in sync.")
+        return
+    mt5_positions = mt5.positions_get()
+    open_trades = {}
+    if mt5_positions:
+        for pos in mt5_positions:
+            symbol = pos.symbol
+            open_trades[symbol] = {
+                "symbol": symbol,
+                "side": "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL",
+                "entry": pos.price_open,
+                "sl": pos.sl,
+                "tp": pos.tp,
+                "ticket": pos.ticket,
+                "status": "open",
+                "timestamp": datetime.fromtimestamp(pos.time).strftime("%Y-%m-%d %H:%M"),
+                "lots": pos.volume
+            }
+        save_all_open_trades(open_trades)
+        print("✅ Synced all open MT5 trades to open_trades.json.")
+    else:
+        print("No open trades to sync.")
+
+        import sys
+
+def print_section(title):
+    print("\n" + "="*60)
+    print(f"=== {title}")
+    print("="*60)
+
+def print_symbol_header(symbol, state):
+    ticket = state.get('ticket', '?')
+    status = state.get('status', '?')
+    lots = state.get('lots', '?')
+    side = state.get('side', '?')
+    entry = state.get('entry', '?')
+    print(f"\n----- {symbol} | State: {status} | Ticket: {ticket} | Side: {side} | Lots: {lots} | Entry: {entry} -----")
+
+
+def pretty_print_json_box(obj, title="GPT Management Suggestion"):
+    print("\n----- {} -----".format(title))
+    import json
+    print(json.dumps(obj, indent=2, ensure_ascii=False))
+    print("-"*60)

@@ -10,11 +10,12 @@ class TelegramLogger:
         self._stdout = sys.stdout  # Save original stdout
 
     def write(self, message):
+        # Filter repetitive 404
+        if "Telegram HTTP error: 404" in message:
+            return
         message = message.strip()
         if message:
-            # Send to terminal
             self._stdout.write(message + "\n")
-            # Also send to Telegram (with basic rate-limiting)
             try:
                 timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 text = f"*{self.prefix} {timestamp}*\n`{message}`"

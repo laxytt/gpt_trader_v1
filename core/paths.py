@@ -15,6 +15,7 @@ SCREENSHOT_TRIGGER_FILE = os.path.join(BASE_DIR, "trigger.txt")
 COMPLETED_TRADES_FILE = os.path.join(DATA_DIR, "completed_trades.jsonl")
 TRADE_STATUS_FILE = os.path.join(DATA_DIR, "trade_status.json")
 OPEN_TRADE_FILE = os.path.join(DATA_DIR, "open_trade.json")
+OPEN_TRADES_FILE = os.path.join(DATA_DIR,"open_trades.json")  
 
 # Example screenshot files
 SCREENSHOT_PATH_H1 = os.path.join(SCREENSHOTS_DIR, "chart_EURUSD_H1.png")

@@ -2,18 +2,24 @@ import time
 from datetime import datetime, timedelta, timezone
 from core.main_cycle import main_cycle
 from core.news_filter import is_news_restricted_now
-from core.mt5_utils import prefilter_instruments, ensure_mt5_initialized  # <-- new import
+from core.mt5_utils import prefilter_instruments, ensure_mt5_initialized
+from core.trade_status import load_all_open_trades, save_all_open_trades
+from core.trade_manager import manage_active_trade
 import MetaTrader5 as mt5
-
 import sys
 import traceback
 from core.telegram_logger import TelegramLogger
-
 import logging
 
+from core.utils import print_section, sync_open_trades_from_mt5
+
 logger = logging.getLogger(__name__)
-# Set this only once, possibly in your main entrypoint if you want to configure format/output
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("transformers").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("pytorch").setLevel(logging.WARNING)
+logging.getLogger("MetaTrader5").setLevel(logging.WARNING)
 
 def global_except_hook(exctype, value, tb):
     if exctype is TypeError and "offset-naive and offset-aware" in str(value):
@@ -28,9 +34,8 @@ sys.excepthook = global_except_hook
 TRADING_START_HOUR = 7
 TRADING_END_HOUR = 23
 
-# Define your universe here (choose wisely for cost)
 SYMBOL_LIST = [
-    "EURUSD", "GBPUSD", "USDJPY", "US30.cash", "US100.cash", "GER40.cash","XAUUSD",
+    "EURUSD", "GBPUSD", "USDJPY", "US30.cash", "US100.cash", "GER40.cash", "XAUUSD",
 ]
 
 def is_trading_time():
@@ -49,8 +54,8 @@ def seconds_until_trading_start(start_hour=7):
 
 # Optional: Use dotenv or config for secrets, not in code!
 try:
-    TELEGRAM_TOKEN = "7758402434:AAFcBDSOYGIN2_xBLSQmlipp1VfrXHly9u8"
-    TELEGRAM_CHAT_ID = "7079805622"
+    TELEGRAM_TOKEN = "YOUR_TOKEN"
+    TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         log = TelegramLogger(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
         sys.stdout = log
@@ -58,27 +63,22 @@ except ImportError:
     pass
 
 def wait_until_next_h1_boundary():
-    from datetime import datetime, timedelta
-    import time
-
     now = datetime.now()
-    # If it's already right at the top of the hour, don't sleep
     if now.minute == 0 and now.second == 0:
         delay = 0
         next_boundary = now
     else:
-        # Next hour at :00:00
         next_boundary = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         delay = (next_boundary - now).total_seconds()
     print(f"⏳ Sleeping {delay:.2f} seconds until {next_boundary.strftime('%Y-%m-%d %H:%M:%S')} (next H1 boundary)...")
     time.sleep(delay)
 
-
 def run_loop():
-    print("📆 GPT Trader loop started (multi-symbol, synced to 5m chart close)")
+    print("📆 GPT Trader loop started (multi-symbol, synced to H1 chart close)")
     if not ensure_mt5_initialized():
         print("❌ Could not initialize MT5 for instrument scanning.")
         return
+
     while True:
         if not is_trading_time():
             sleep_seconds = seconds_until_trading_start(TRADING_START_HOUR)
@@ -90,7 +90,6 @@ def run_loop():
         ensure_mt5_initialized()
         print(f"🔄 Starting multi-symbol main cycle at {datetime.now().strftime('%H:%M:%S')}")
 
-        # --- Prefilter (ATR/volume) ---
         try:
             candidate_symbols = prefilter_instruments(SYMBOL_LIST)
         except Exception as e:
@@ -99,18 +98,40 @@ def run_loop():
 
         print(f"🔎 Candidates passing ATR/volume filter: {candidate_symbols}")
 
-        # --- Per-symbol GPT cycle ---
+        # --- Load all open trades from file/dict
+        open_trades = load_all_open_trades()  # Dict: {symbol: trade_dict}
+
         for symbol in candidate_symbols:
             try:
-                # Optionally, skip if news-restricted for this symbol
                 if is_news_restricted_now(symbol, datetime.now(timezone.utc)):
-                    print(f"⚠️ Skipping {symbol} due to restricted macro news event.")
+                    print_section(f"NEWS BLOCKED: Skipping {symbol} due to restricted macro event.")
                     continue
-                main_cycle(symbol=symbol)   # <--- pass symbol to your main_cycle!
+
+                # --- Trade management step (per symbol) ---
+                trade = open_trades.get(symbol)
+                if trade:
+                    print(f"🟡 Managing active trade for {symbol}")
+                    manage_active_trade(trade)
+                    # Save any updates (e.g., SL/TP moved)
+                    open_trades[symbol] = trade
+                    # If trade is now closed, remove it
+                    if trade.get("status") == "closed":
+                        open_trades.pop(symbol)
+                        print_section(f"Trade for {symbol} is now closed/removed.")
+                    continue
+
+                # --- Entry logic if no open trade ---
+                print_section(f"Looking for new trade signal for {symbol}")
+                main_cycle(symbol=symbol)
+
             except Exception as e:
-                print(f"❌ Exception in main_cycle({symbol}): {e}")
+                print_section(f"❌ Exception in main_cycle({symbol})")
                 traceback.print_exc()
-                # continue to next symbol
+
+        # Save the state of open trades after each loop
+        save_all_open_trades(open_trades)
         wait_until_next_h1_boundary()
+
 if __name__ == "__main__":
+    sync_open_trades_from_mt5()
     run_loop()

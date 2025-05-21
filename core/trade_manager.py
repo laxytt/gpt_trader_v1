@@ -8,7 +8,7 @@ from core.logger import append_trade_to_file
 from core.paths import COMPLETED_TRADES_FILE, OPEN_TRADE_FILE
 from core.utils import format_trade_case, get_market_session, get_volatility_context, get_win_loss_streak, np_encoder
 from mt5_data import get_recent_candle_history_and_chart
-from mt5_utils import ensure_mt5_initialized
+from core.mt5_utils import ensure_mt5_initialized
 from core.news_utils import get_upcoming_news
 import openai
 from core.rag_memory import TradeMemoryRAG

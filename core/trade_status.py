@@ -2,6 +2,7 @@ import os
 import json
 from datetime import datetime, timezone
 import MetaTrader5 as mt5
+from core.paths import OPEN_TRADES_FILE
 
 # You can put these in core/paths.py if you prefer centralization
 def _state_path(symbol):
@@ -57,3 +58,13 @@ def migrate_global_status_file(global_file="trade_status.json", symbol="EURUSD")
         os.rename(global_file, global_file + ".bak")
         print(f"Migrated {global_file} to per-symbol {symbol} file.")
 
+
+def load_all_open_trades():
+    if os.path.exists(OPEN_TRADES_FILE):
+        with open(OPEN_TRADES_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_all_open_trades(trades_dict):
+    with open(OPEN_TRADES_FILE, "w") as f:
+        json.dump(trades_dict, f, indent=2)

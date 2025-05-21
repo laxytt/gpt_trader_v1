@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
 import MetaTrader5 as mt5
 import time
 import logging
 import pandas as pd
+from core.trade_status import load_all_open_trades, save_all_open_trades
 
 # Configure logging (recommended for all modules)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -78,22 +80,32 @@ def get_symbol_spread(symbol="EURUSD"):
     spread = abs(tick.ask - tick.bid) * 10000  # pips for most majors
     return spread
 
-def calculate_lot_size(entry, sl, risk_usd, pip_value=10, spread_pips=1, commission_per_lot=7):
-    """
-    Returns lot size so that (SL distance + spread + commission) risk <= risk_usd.
-    """
-    sl_pips = abs(entry - sl) * 10000
-    if sl_pips == 0:
+def calculate_lot_size(entry, sl, risk_usd, symbol, spread_pips=1.0, commission_per_lot=7.0):
+    symbol_info = mt5.symbol_info(symbol)
+    if not symbol_info:
+        print(f"❌ Could not get symbol info for {symbol}")
         return 0
-    total_pip_risk = sl_pips + spread_pips
-    per_lot_risk = pip_value * total_pip_risk + commission_per_lot
-    lot_size = risk_usd / per_lot_risk
-    return round(max(lot_size, 0.01), 2)  # don't allow negative/zero, min 0.01 lot
+    point = symbol_info.point
+    contract_size = symbol_info.trade_contract_size
+    sl_distance = abs(entry - sl)
+    if sl_distance < point * 2:
+        print("⚠️ SL distance too small!")
+        return 0
+    value_per_point = contract_size * point
+    risk_per_lot = sl_distance / point * value_per_point
+    # Optionally, include spread+commission:
+    effective_risk = risk_per_lot + (spread_pips * value_per_point) + commission_per_lot
+    lot_size = risk_usd / effective_risk
+    # lot_size = risk_usd / risk_per_lot
+    min_lot = symbol_info.volume_min
+    lot_step = symbol_info.volume_step
+    lot_size = max(min_lot, round(lot_size / lot_step) * lot_step)
+    return lot_size
 
 
 def open_trade_in_mt5(signal, risk_usd=15):
     """
-    Opens a trade based on the GPT signal. Risk per trade is capped at $20 including spread+commission.
+    Opens a trade based on the GPT signal and saves it to multi-symbol open trades file.
     Returns the MT5 order_send result or None on failure.
     """
     if not ensure_mt5_initialized():
@@ -105,11 +117,10 @@ def open_trade_in_mt5(signal, risk_usd=15):
     tp = signal["tp"]
     side = signal["signal"]
 
-    pip_value = 10  # For EURUSD, GBPUSD etc. ($10 per pip per lot)
     spread_pips = get_symbol_spread(symbol) or 1.0
-    commission_per_lot = 7.0
+    commission_per_lot = 7.0  # Replace if needed
 
-    lot_size = calculate_lot_size(entry, sl, risk_usd, pip_value, spread_pips, commission_per_lot)
+    lot_size = calculate_lot_size(entry, sl, risk_usd, symbol, spread_pips, commission_per_lot)
 
     if lot_size <= 0:
         print("❌ Lot size is zero or negative—trade skipped!")
@@ -141,10 +152,28 @@ def open_trade_in_mt5(signal, risk_usd=15):
     result = mt5.order_send(request)
     if hasattr(result, "retcode") and result.retcode == mt5.TRADE_RETCODE_DONE:
         print(f"✅ Trade opened for {symbol}: {side} {lot_size} lots @ {price}")
+
+        # --- Save open trade in multi-symbol state ---
+        open_trades = load_all_open_trades()
+        open_trades[symbol] = {
+            "symbol": symbol,
+            "side": side,
+            "entry": price,
+            "sl": sl,
+            "tp": tp,
+            "ticket": getattr(result, "order", None) or getattr(result, "order_ticket", None),
+            "status": "open",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+            "lots": lot_size
+            # You can add more fields if needed (risk, RR, GPT reasoning, etc.)
+        }
+        save_all_open_trades(open_trades)
+
         return result
     else:
         print(f"❌ Failed to open trade: {getattr(result, 'retcode', None)} - {getattr(result, 'comment', '')}")
         return result
+
 
 def get_current_open_position():
     """

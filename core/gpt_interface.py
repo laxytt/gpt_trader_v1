@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 import openai
@@ -11,12 +12,11 @@ from core.news_utils import get_upcoming_news
 from core.rag_memory import TradeMemoryRAG
 from core.utils import (
     encode_image_as_b64, get_market_session,
-    get_volatility_context, get_win_loss_streak, np_encoder
+    get_volatility_context, get_win_loss_streak, np_encoder, pretty_print_json_box, print_section
 )
 
 client = openai.OpenAI()
 memory = TradeMemoryRAG()
-
 SYSTEM_PROMPT = """
 You are an expert momentum and Volume Spread Analysis (VSA) trader and coach. Generate strictly rule-based signals for trading {symbol} on H1 (entry) with H4 (background/trend), using both momentum and VSA confirmation. FTMO-style risk.
 
@@ -89,29 +89,8 @@ Always return ALL of these keys in your SINGLE JSON: symbol, signal, entry, sl, 
 }}
 """
 
-
-
-def safe_parse_json(text: str) -> dict:
-    """Parse a single JSON object from a GPT reply. Handles triple-backticks and basic fallback."""
-    try:
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.strip("`").strip()
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        # Remove any repeated JSON blocks (take only the first complete JSON)
-        if text.count("{") > 1 and text.count("}") > 1:
-            start = text.index("{")
-            end = text.index("}", start) + 1
-            text = text[start:end]
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        print("❌ Failed to parse GPT response as JSON:")
-        print(text)
-        with open("last_failed_response.txt", "w", encoding="utf-8") as f:
-            f.write(text)
-        raise e
-
+def print_gpt_tokens_cost(token_info):
+    print(f"🧾 [Tokens] prompt: {token_info['tokens_prompt']}, completion: {token_info['tokens_completion']}, cost: ${token_info['cost_usd']}")
 
 def estimate_tokens_and_cost(prompt: str, completion: str, model: str = "gpt-4.1-2025-04-14") -> dict:
     try:
@@ -128,12 +107,30 @@ def estimate_tokens_and_cost(prompt: str, completion: str, model: str = "gpt-4.1
     }
 
 
+# ========== SAFE PARSE JSON ==========
+def safe_parse_json(text: str) -> dict:
+    """
+    Parse a single JSON object from a GPT reply, even if extra text follows.
+    """
+    text = text.strip()
+    # Extract first {...} JSON block even if extra text follows
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        json_str = match.group(0)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            print("❌ Still failed to parse as JSON:", e)
+            print(json_str)
+            raise e
+    else:
+        print("❌ No JSON found in GPT response!")
+        print(text)
+        raise ValueError("No JSON found")
+
+# ========== GPT SIGNAL ==========
 def ask_gpt_for_signal(symbol: str = "EURUSD", bars_json: int = 20, bars_chart: int = 80) -> dict:
-    """
-    Generates a trading signal for the given symbol using latest market data and screenshots.
-    bars_json: bars sent in the JSON to GPT (keep low, e.g. 20 for cost reasons)
-    bars_chart: bars shown on the screenshot (for better VSA context, e.g. 80)
-    """
+    print_section(f"GPT SIGNAL REQUEST — {symbol}")
     prompt_data = get_recent_candle_history_and_chart(symbol=symbol, bars_json=bars_json, bars_chart=bars_chart)
 
     if prompt_data.get("error"):
@@ -159,14 +156,17 @@ def ask_gpt_for_signal(symbol: str = "EURUSD", bars_json: int = 20, bars_chart: 
         return {"signal": "WAIT", "symbol": symbol, "reason": "Invalid or missing H1 price history", "entry": None, "sl": None, "tp": None, "rr": None, "risk_class": "C"}
 
     df_h1 = pd.DataFrame(history_h1)
+    df_h4 = pd.DataFrame(history_h4) if isinstance(history_h4, list) and len(history_h4) > 0 else pd.DataFrame()
     now = datetime.now(timezone.utc)
     session = get_market_session(now)
     volatility = get_volatility_context(df_h1)
     streak_info = get_win_loss_streak(symbol=symbol)
 
-    # Summaries (as before, omitted for brevity)
+    # Optionally print H4 context summary
+    if not df_h4.empty:
+        last_h4 = df_h4.iloc[-1]
+        print(f"H4 Context — Close: {last_h4['close']:.5f}, EMA50: {last_h4['ema50']:.5f}, EMA200: {last_h4['ema200']:.5f}, RSI: {last_h4['rsi14']:.2f}")
 
-    # Add extra context
     prompt_data.update({
         "market_session": session,
         "volatility": volatility,
@@ -176,7 +176,6 @@ def ask_gpt_for_signal(symbol: str = "EURUSD", bars_json: int = 20, bars_chart: 
         "streak_sample_size": streak_info["sample_size"]
     })
 
-    # Prepare scenario string for GPT
     scenario_string = (
         f"\nMarket context:\n"
         f"- Time: {now.isoformat(timespec='seconds')}\n"
@@ -197,17 +196,14 @@ def ask_gpt_for_signal(symbol: str = "EURUSD", bars_json: int = 20, bars_chart: 
             f"Volume={details['volume']}, ATR={details['atr14']}"
         )
     retrieved_cases = memory.query(context_text, symbol=symbol)
-    if isinstance(retrieved_cases, list) and len(retrieved_cases) > 0:
-        cleaned = [case for case in retrieved_cases if all(
-            k in case for k in ["context", "signal", "rr", "result", "reason"]
-        )]
-        prompt_data["historical_cases"] = cleaned if cleaned else []
-    else:
-        prompt_data["historical_cases"] = []
+    prompt_data["historical_cases"] = [
+        case for case in (retrieved_cases if retrieved_cases else [])
+        if all(k in case for k in ["context", "signal", "rr", "result", "reason"])
+    ]
 
     prompt_data["upcoming_news"] = get_upcoming_news(symbol=symbol, within_minutes=2880)
     prompt_json = json.dumps(prompt_data, indent=2, default=np_encoder)
-    print(f"📤 Sending {symbol} data to GPT...")
+    print("📤 Sending {} data to GPT...".format(symbol))
 
     # Build multimodal GPT input
     message_content = [
@@ -227,29 +223,25 @@ def ask_gpt_for_signal(symbol: str = "EURUSD", bars_json: int = 20, bars_chart: 
 
     msg = response.choices[0].message.content
     token_info = estimate_tokens_and_cost(prompt_json, msg)
-    print("🧾 Token usage and cost:", token_info)
+    print_gpt_tokens_cost(token_info)
 
     parsed = safe_parse_json(msg)
-    # Strict output enforcement
+    pretty_print_json_box(parsed, title="GPT SIGNAL OUTPUT")
+
     required_keys = ["symbol", "signal", "entry", "sl", "tp", "rr", "risk_class", "reason"]
     for k in required_keys:
         if k not in parsed:
             parsed[k] = None
-    # Always enforce correct symbol in output
     parsed["symbol"] = symbol
-    # Defensive: ensure signal is valid
     if parsed.get("signal") not in ("BUY", "SELL", "WAIT"):
         parsed["signal"] = "WAIT"
         parsed["reason"] = f"Invalid or unrecognized signal type: {parsed.get('signal')}"
     return parsed
 
-
+# ========== GPT REFLECTION ==========
 def ask_gpt_for_reflection(trade: dict, bars_json: int = 20, bars_chart: int = 80) -> dict:
-    """
-    Requests a GPT review of a completed trade, with both H1 and h4 histories for richer context.
-    Returns the trade dict with an added "reflection" field.
-    """
     symbol = trade.get("symbol", "EURUSD")
+    print_section(f"GPT REFLECTION — {symbol}")
     recent = get_recent_candle_history_and_chart(symbol=symbol, bars_json=bars_json, bars_chart=bars_chart)
     history_h1 = recent.get("history_h1", [])
     history_h4 = recent.get("history_h4", [])
@@ -284,7 +276,7 @@ Respond in one paragraph.
     )
 
     msg = response.choices[0].message.content.strip()
+    print_section("GPT REFLECTION OUTPUT")
+    print(msg)
     trade["reflection"] = msg
-    print("🪞 Reflection:", msg)
-
     return trade
