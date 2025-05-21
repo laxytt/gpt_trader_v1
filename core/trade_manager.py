@@ -24,13 +24,13 @@ You are an expert algorithmic trade manager operating a VSA-based intraday strat
 
 **You are always given:**
 - Trade info (side, entry, SL, TP, RR, PnL, drawdown, time open).
-- Last 20 M5 candles (with indicators: EMA50, EMA200, RSI14, ATR14, rsi_slope).
-- Last 20 H1 candles (same indicators).
+- Last 20 H1 candles (with indicators: EMA50, EMA200, RSI14, ATR14, rsi_slope).
+- Last 20 H4 candles (same indicators).
 - Latest market context (session, volatility, win/loss streak, news).
 - Upcoming macro news events (within next 30 minutes).
 
 **Your job:**
-- Analyze *both* H1 (for trend/background/major S/R) and M5 (for recent structure and trade progress).
+- Analyze *both* H4 (for trend/background/major S/R) and H1 (for recent structure and trade progress).
 - Confirm the trade remains valid in context of VSA and current price/volume/indicator behavior.
 - Recommend **one** management action:  
     - `"HOLD"` (keep position open, trend/logic intact)
@@ -43,12 +43,12 @@ You are an expert algorithmic trade manager operating a VSA-based intraday strat
 - **CLOSE_NOW**: If trend is reversing, sudden volume spike against, major news within 2 minutes, or trade has timed out (open > 15 candles).
 
 **Always explain your rationale:**  
-State what you see in both H1 and M5, and why your action fits strict VSA/FTMO rules.
+State what you see in both H4 and H1, and why your action fits strict VSA/FTMO rules.
 
 **Output strict JSON only:**  
 {
   "decision": "HOLD" | "MOVE_SL" | "CLOSE_NOW",
-  "reason": "Short explanation of rationale. Mention H1/M5 context, volume, structure, news if relevant.",
+  "reason": "Short explanation of rationale. Mention H4/H1 context, volume, structure, news if relevant.",
   "risk_class": "A" | "B" | "C"
 }
 
@@ -57,21 +57,21 @@ State what you see in both H1 and M5, and why your action fits strict VSA/FTMO r
 HOLD:
 {
   "decision": "HOLD",
-  "reason": "M5 trend and VSA context unchanged; H1 uptrend intact; volume steady, no news risk.",
+  "reason": "H1 trend and VSA context unchanged; H4 uptrend intact; volume steady, no news risk.",
   "risk_class": "A"
 }
 
 MOVE_SL:
 {
   "decision": "MOVE_SL",
-  "reason": "Trade reached +1R, price above entry; M5 shows consolidation, H1 still in trend. Moving SL to breakeven.",
+  "reason": "Trade reached +1R, price above entry; H1 shows consolidation, H4 still in trend. Moving SL to breakeven.",
   "risk_class": "B"
 }
 
 CLOSE_NOW:
 {
   "decision": "CLOSE_NOW",
-  "reason": "High-impact news (NFP) in 1 minute; H1 and M5 both show mixed signals, closing to avoid event risk.",
+  "reason": "High-impact news (NFP) in 1 minute; H4 and H1 both show mixed signals, closing to avoid event risk.",
   "risk_class": "A"
 }
 """
@@ -207,9 +207,9 @@ def maybe_breakeven_adjustment(trade):
 
 def ask_gpt_for_trade_management(trade):
     """
-    Uses both M5 and H1 data to generate robust management logic for open trades.
+    Uses both H1 and H4 data to generate robust management logic for open trades.
     """
-    # Fetch both M5 and H1 candle histories
+    # Fetch both H1 and H4 candle histories
     recent = get_recent_candle_history_and_chart(symbol=trade["symbol"])
     
     if recent.get("error"):
@@ -220,24 +220,24 @@ def ask_gpt_for_trade_management(trade):
             "risk_class": "C"
         }
     
-    history_m5 = recent.get("history_m5", [])
     history_h1 = recent.get("history_h1", [])
-    if not isinstance(history_m5, list) or len(history_m5) == 0:
-        print("⛔ No M5 candle history available. Returning HOLD.")
+    history_h4 = recent.get("history_h4", [])
+    if not isinstance(history_h1, list) or len(history_h1) == 0:
+        print("⛔ No H1 candle history available. Returning HOLD.")
         return {
             "decision": "HOLD",
-            "reason": "No M5 candle history (data error)",
+            "reason": "No H1 candle history (data error)",
             "risk_class": "C"
         }
-    if not isinstance(history_h1, list) or len(history_h1) == 0:
-        print("⚠️ Warning: H1 candle history missing. Management may be less reliable.")
+    if not isinstance(history_h4, list) or len(history_h4) == 0:
+        print("⚠️ Warning: H4 candle history missing. Management may be less reliable.")
 
-    df_m5 = pd.DataFrame(history_m5)
     df_h1 = pd.DataFrame(history_h1)
-    last_bar = df_m5.iloc[-1] if not df_m5.empty else None
+    df_h4 = pd.DataFrame(history_h4)
+    last_bar = df_h1.iloc[-1] if not df_h1.empty else None
     now = datetime.now(timezone.utc)
     session = get_market_session(now)
-    volatility = get_volatility_context(df_m5)
+    volatility = get_volatility_context(df_h1)
     streak_info = get_win_loss_streak()
 
     # Prepare scenario summaries
@@ -264,11 +264,11 @@ def ask_gpt_for_trade_management(trade):
         f"- Volatility: {volatility}\n"
         f"- Recent win/loss streak: {streak_info['streak_type']} ({streak_info['streak_length']})\n"
         f"- Win rate (last {streak_info['sample_size']}): {streak_info['win_rate']:.1%}\n\n"
-        f"Available scenarios (based on M5):\n"
+        f"Available scenarios (based on H1):\n"
         f"A) HOLD: {hold_summary}\n"
         f"B) MOVE_SL: {move_sl_summary}\n"
         f"C) CLOSE_NOW: {close_now_summary}\n\n"
-        f"Higher timeframe (H1) context is available for trend/background logic.\n"
+        f"Higher timeframe (H4) context is available for trend/background logic.\n"
         f"Please choose the best scenario, explain your rationale in 1-2 sentences, "
         f"and output your decision in JSON format as:\n"
         '{\n  "decision": "HOLD"|"MOVE_SL"|"CLOSE_NOW",\n  "reason": "...",\n  "risk_class": "A"|"B"|"C"\n}\n'
@@ -286,10 +286,10 @@ def ask_gpt_for_trade_management(trade):
 
     payload = {
         "trade": trade,
-        "market_m5": market_context,
-        "history_m5": history_m5,
+        "market_h1": market_context,
         "history_h1": history_h1,
-        "news": get_upcoming_news(within_minutes=30),
+        "history_h4": history_h4,
+        "news": get_upcoming_news(within_minutes=30, symbol=trade["symbol"]),
         "feedback": {
             "floating_profit": trade.get("floating", 0.0),
             "drawdown": trade.get("max_drawdown_pips", 0.0),

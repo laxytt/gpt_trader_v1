@@ -1,18 +1,28 @@
 import json
-from datetime import datetime, timedelta, timezone
 import os
+from datetime import datetime, timedelta, timezone
 
 NEWS_FILE = "data/forexfactory_week.json"
 
-def load_news_data():
+# Optional: for per-symbol currency mapping in multi-asset scans
+SYMBOL_CURRENCY_MAP = {
+    "EURUSD": ("EUR", "USD"),
+    "GBPUSD": ("GBP", "USD"),
+    "USDJPY": ("USD", "JPY"),
+    "USDCAD": ("USD", "CAD"),
+    "AUDUSD": ("AUD", "USD"),
+    # Add more as needed
+}
+
+def load_news_data(news_file=NEWS_FILE):
     """
-    Loads news events from the JSON file.
+    Loads news events from a JSON file.
     """
-    if not os.path.exists(NEWS_FILE):
-        print(f"⚠️ News file {NEWS_FILE} missing.")
+    if not os.path.exists(news_file):
+        print(f"⚠️ News file {news_file} missing.")
         return []
     try:
-        with open(NEWS_FILE, "r", encoding="utf-8") as f:
+        with open(news_file, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         print(f"❌ Error loading news: {e}")
@@ -20,7 +30,7 @@ def load_news_data():
 
 def parse_event_datetime(event):
     """
-    Parses the event's date string into a timezone-aware UTC datetime.
+    Parses an event's date string to a timezone-aware UTC datetime.
     """
     date_str = event.get("date")
     if not date_str:
@@ -40,12 +50,17 @@ def parse_event_datetime(event):
         except Exception:
             return None
 
-def get_upcoming_news(within_minutes=15, now=None, currencies=("USD", "EUR")):
+def get_upcoming_news(within_minutes=15, now=None, currencies=None, symbol=None):
     """
-    Returns list of news events within 'within_minutes' from now for given currencies.
+    Returns news events for given currencies within 'within_minutes' from 'now'.
+    If 'symbol' is given, uses SYMBOL_CURRENCY_MAP for currency selection.
     """
     if now is None:
         now = datetime.now(timezone.utc)
+    if currencies is None and symbol:
+        currencies = SYMBOL_CURRENCY_MAP.get(symbol, ("USD", "EUR"))
+    elif currencies is None:
+        currencies = ("USD", "EUR")
     news = load_news_data()
     filtered = []
     window_start = now
@@ -59,15 +74,19 @@ def get_upcoming_news(within_minutes=15, now=None, currencies=("USD", "EUR")):
         if window_start <= event_time <= window_end:
             if event.get("country") in currencies:
                 filtered.append(event)
-
     return filtered
 
-def find_next_high_impact_news(now=None, currencies=("USD", "EUR")):
+def find_next_high_impact_news(now=None, currencies=None, symbol=None):
     """
-    Returns the next high-impact news event for the specified currencies after 'now'.
+    Returns the next high-impact news event for the given currencies after 'now'.
+    If 'symbol' is provided, uses currency map.
     """
     if now is None:
         now = datetime.now(timezone.utc)
+    if currencies is None and symbol:
+        currencies = SYMBOL_CURRENCY_MAP.get(symbol, ("USD", "EUR"))
+    elif currencies is None:
+        currencies = ("USD", "EUR")
     news = load_news_data()
     high_impact = []
     for event in news:

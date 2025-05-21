@@ -1,17 +1,18 @@
 {
-  "signal": "WAIT",
-  "reason": "Although M5 is above EMA50 and RSI is rising, the very last candle is a low volume doji with no clear follow-through, and ATR is low. H1 shows the up move but no volume spike or VSA confirmation like stopping volume, test, or two-bar reversal; therefore, VSA confirmation is lacking and context is not strong enough for entry."
-}
-
----
-
-{
-  "symbol": "EURUSD",
+  "symbol": "XAUUSD",
   "signal": "WAIT",
   "entry": null,
   "sl": null,
   "tp": null,
   "rr": null,
-  "risk_class": "C",
-  "reason": "Price is above EMA50 and RSI is rising on M5, but last bar is a doji with extremely low volume and no VSA signal sequence or clear confirmation. H1 trend is up but lacks VSA confirmation (e.g., stopping volume, test, or two-bar reversal). ATR remains low, so no valid setup is present."
+  "risk_class": "B",
+  "reason": "No valid H1 momentum breakout or impulse candle at session latest close: price is above EMAs and prior uptrend confirmed on H4 (trend up), but H1 RSI is falling (65.6 from 72), no new 10-bar high, last bar's body is not >1.2×ATR, and volume is not elevated. No clear VSA bullish sequence—latest volume is average, recent spread narrowing suggests possible absorption or pause, not a confirmed No Supply test. Wait for fresh momentum breakout with volume and VSA confirmation."
 }
+```
+**Rationale breakdown:**
+- **Momentum:** No new 10-bar high or impulse. Last H1 candle's close (3309.81) is below prior highs; body size not >1.2×ATR. While price is above both EMAs, RSI is dropping and not >70.
+- **VSA:** No clear stopping volume, two-bar reversal, or classic VSA BUY pattern. Volume is not significantly above median.
+- **H4 Trend:** Strong uptrend background, so only considering BUY signals.
+- **Entry Risk/Filters:** ATR and volume short-term adequate, but signal not present; no imminent macro news risk.
+- **Action:** WAIT for a new qualified breakout or a clean VSA confirmation. No forced entry.
+- **Risk class:** B (trend clear but entry not present, avoid forcing trades in strong directional move without clear secondary trigger confirmation).

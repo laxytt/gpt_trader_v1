@@ -17,8 +17,8 @@ TRADE_STATUS_FILE = os.path.join(DATA_DIR, "trade_status.json")
 OPEN_TRADE_FILE = os.path.join(DATA_DIR, "open_trade.json")
 
 # Example screenshot files
-SCREENSHOT_PATH_M5 = os.path.join(SCREENSHOTS_DIR, "chart_EURUSD_M5.png")
 SCREENSHOT_PATH_H1 = os.path.join(SCREENSHOTS_DIR, "chart_EURUSD_H1.png")
+SCREENSHOT_PATH_H4 = os.path.join(SCREENSHOTS_DIR, "chart_EURUSD_H4.png")
 
 MT5_FILES_DIR = r"C:/Users/laxyt/AppData/Roaming/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Files"
 TRIGGER_PATH = os.path.join(MT5_FILES_DIR, "trigger.txt")

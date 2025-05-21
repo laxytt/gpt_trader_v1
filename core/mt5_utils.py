@@ -1,24 +1,32 @@
 import MetaTrader5 as mt5
 import time
 import logging
+import pandas as pd
 
 # Configure logging (recommended for all modules)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-def ensure_mt5_initialized(retry=2, delay=1):
+logger = logging.getLogger(__name__)
+
+def ensure_mt5_initialized(retry=3, delay=1):
     """
     Ensure MT5 is initialized before API calls. Tries to reconnect on failure.
     """
-    if mt5.initialize():
-        return True
-    logging.warning("MT5 initialization failed, retrying...")
-    for _ in range(retry):
-        time.sleep(delay)
+    try:
         if mt5.initialize():
-            logging.info("MT5 initialized on retry.")
             return True
-    logging.error("MT5 initialization failed after retries.")
-    return False
+        logging.warning("MT5 initialization failed, retrying...")
+        for _ in range(retry):
+            time.sleep(delay)
+            if mt5.initialize():
+                logging.info("MT5 initialized on retry.")
+                return True
+        logging.error("MT5 initialization failed after retries.")
+        return False
+    except Exception as e:
+        logging.error(f"Exception during MT5 initialization: {e}")
+        return False
+
 
 def get_last_closed_price(symbol):
     """
@@ -64,7 +72,6 @@ def get_symbol_spread(symbol="EURUSD"):
         print("❌ Could not initialize MT5.")
         return 1.0
     tick = mt5.symbol_info_tick(symbol)
-    mt5.shutdown()
     if not tick:
         print(f"❌ Could not get symbol info for {symbol}.")
         return 1.0
@@ -84,7 +91,7 @@ def calculate_lot_size(entry, sl, risk_usd, pip_value=10, spread_pips=1, commiss
     return round(max(lot_size, 0.01), 2)  # don't allow negative/zero, min 0.01 lot
 
 
-def open_trade_in_mt5(signal, risk_usd=20):
+def open_trade_in_mt5(signal, risk_usd=15):
     """
     Opens a trade based on the GPT signal. Risk per trade is capped at $20 including spread+commission.
     Returns the MT5 order_send result or None on failure.
@@ -158,16 +165,81 @@ def get_current_open_position():
         "ticket": pos.ticket
     }
 
-def prefilter_instruments(symbols, min_atr=0.0003, min_volume=200):
+import MetaTrader5 as mt5
+import pandas as pd
+import talib
+import logging
+
+logger = logging.getLogger("gpt_trader.prefilter")
+
+# Internal per-symbol override table (for defaults)
+SYMBOL_THRESHOLDS = {
+    "EURUSD": {"min_atr": 0.0008, "min_volume": 60},
+    "GBPUSD": {"min_atr": 0.0010, "min_volume": 60},
+    "USDJPY": {"min_atr": 0.08, "min_volume": 50},
+    "XAUUSD": {"min_atr": 2.0, "min_volume": 200},
+    "US30.cash": {"min_atr": 30.0, "min_volume": 200},
+    "GER40.cash": {"min_atr": 12.0, "min_volume": 150},
+    "US100.cash": {"min_atr": 15.0, "min_volume": 200},
+}
+
+def prefilter_instruments(
+    symbols,
+    min_atr=0.0003,      # Keep old default for compatibility
+    min_volume=200,      # Keep old default for compatibility
+    bars=80,
+    timeframe=mt5.TIMEFRAME_H1,
+    return_debug=False,
+    use_relative_filter=False  # New flag, off by default
+):
+    """
+    Filters instruments based on min ATR and volume criteria.
+    If min_atr/min_volume are left as defaults, will use per-symbol overrides for known symbols.
+    Optionally applies a relative (median-based) filter.
+    """
     filtered = []
+    debug_log = []
     for symbol in symbols:
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 20)
-        if rates is None or len(rates) < 15:
-            continue
-        df = pd.DataFrame(rates)
-        atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
-        last_vol = df['tick_volume'].iloc[-1]
-        # Add more filters if needed (spread, price change, etc.)
-        if atr >= min_atr and last_vol >= min_volume:
-            filtered.append(symbol)
+        try:
+            # Use per-symbol threshold only if caller didn't specify a custom threshold
+            eff_min_atr = min_atr
+            eff_min_volume = min_volume
+            if min_atr == 0.0003 and min_volume == 200 and symbol in SYMBOL_THRESHOLDS:
+                eff_min_atr = SYMBOL_THRESHOLDS[symbol]["min_atr"]
+                eff_min_volume = SYMBOL_THRESHOLDS[symbol]["min_volume"]
+
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
+            if rates is None or len(rates) < 20:
+                debug_log.append(f"{symbol}: ❌ Not enough bars ({len(rates) if rates is not None else 0}) [FAILED]")
+                continue
+            df = pd.DataFrame(rates)
+            df['atr14'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+            atr = df['atr14'].iloc[-2]
+            last_vol = df['tick_volume'].iloc[-2]
+            median_atr = df['atr14'].iloc[-21:-1].median()
+            median_vol = df['tick_volume'].iloc[-21:-1].median()
+            reasons = []
+            if pd.isna(atr) or atr < eff_min_atr:
+                reasons.append(f"ATR {atr:.5f} < {eff_min_atr}")
+            if last_vol < eff_min_volume:
+                reasons.append(f"Volume {last_vol} < {eff_min_volume}")
+            # Optionally apply median-based filter
+            if use_relative_filter:
+                if atr < 0.8 * median_atr:
+                    reasons.append(f"ATR {atr:.5f} < 80% of median {median_atr:.5f}")
+                if last_vol < 0.8 * median_vol:
+                    reasons.append(f"Volume {last_vol} < 80% of median {median_vol:.1f}")
+            last_candle_time = pd.to_datetime(df['time'].iloc[-2], unit='s')
+            if reasons:
+                debug_log.append(f"{symbol}: ❌ {last_candle_time} — " + "; ".join(reasons) + " [FAILED]")
+            else:
+                debug_log.append(f"{symbol}: ✅ {last_candle_time} ATR={atr:.5f} (min {eff_min_atr}), Vol={last_vol} (min {eff_min_volume}) [PASSED]")
+                filtered.append(symbol)
+        except Exception as e:
+            debug_log.append(f"{symbol}: ❌ Exception: {e} [FAILED]")
+    logger.info("Prefilter debug info:")
+    for line in debug_log:
+        logger.info("   %s", line)
+    if return_debug:
+        return filtered, debug_log
     return filtered

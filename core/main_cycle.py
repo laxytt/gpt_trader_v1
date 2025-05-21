@@ -7,80 +7,79 @@ from mt5_utils import ensure_mt5_initialized, get_current_open_position, get_las
 from core.trade_status import load_trade_status, save_trade_status
 from core.trade_manager import TIER_RISK_MAPPING, manage_active_trade
 
-def main_cycle():
-     # -- Step 1: Always resync state from MT5 at the start of the cycle --
+def main_cycle(symbol="EURUSD"):
+    # -- Step 1: Always resync state from MT5 at the start of the cycle --
+    mt5_live_trade = None  # <-- Fix: ensure always defined
+
     try:
-        mt5_live_trade = get_current_open_position()
+        mt5_live_trade = get_current_open_position(symbol=symbol)
     except Exception as e:
         log_resync("Error", f"MT5 API error: {str(e)}")
 
     if not is_file_fresh(NEWS_FILE, max_age_sec=7*24*3600):
         print(f"⛔ Calendar file {NEWS_FILE} is older than 7 days! Skipping trading this cycle.")
-        # Optionally send a Telegram alert here.
         return  {"signal": "WAIT", "reason": "Economic calendar file is outdated."}
 
-    local_state = load_trade_status()
+    local_state = load_trade_status(symbol)  # You may want per-symbol state
 
     # CASE 1: MT5 live trade but local state idle OR wrong trade
     if mt5_live_trade and (local_state.get("status") != "open" or local_state.get("ticket") != mt5_live_trade.get("ticket")):
-        print("🔄 Resync: MT5 reports open trade, updating local state.")
+        print(f"🔄 Resync: MT5 reports open trade for {symbol}, updating local state.")
         mt5_live_trade["status"] = "open"
-        save_trade_status(mt5_live_trade)
-        log_resync("MT5->Local", f"ticket={mt5_live_trade.get('ticket')}, symbol={mt5_live_trade.get('symbol')}")
+        save_trade_status(mt5_live_trade, symbol)
+        log_resync("MT5->Local", f"ticket={mt5_live_trade.get('ticket')}, symbol={symbol}")
         local_state = mt5_live_trade  # Resynced!
 
     # CASE 2: Local state says open, but MT5 is flat
     if not mt5_live_trade and local_state.get("status") == "open":
-        print("🔄 Resync: No open trade in MT5, setting local state to idle.")
-        idle_state = {"status": "idle", "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")}
-        save_trade_status(idle_state)
-        log_resync("Local->Idle", f"ticket={local_state.get('ticket')}, symbol={local_state.get('symbol')}")
+        print(f"🔄 Resync: No open trade in MT5 for {symbol}, setting local state to idle.")
+        idle_state = {"status": "idle", "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), "symbol": symbol}
+        save_trade_status(idle_state, symbol)
+        log_resync("Local->Idle", f"ticket={local_state.get('ticket')}, symbol={symbol}")
         local_state = idle_state
         
-    state = load_trade_status()
-    print(f"📦 Current trade state: {state}")
+    state = load_trade_status(symbol)
+    print(f"📦 Current trade state for {symbol}: {state}")
 
     # Validate trade state structure
     if "symbol" not in state:
-        print("⚠️ Invalid state file — missing symbol. Skipping cycle.")
+        print(f"⚠️ Invalid state file for {symbol} — missing symbol. Skipping cycle.")
         return
 
     check_for_signal = True
-    position_status = is_position_opened(state["symbol"], state.get("ticket"))
+    position_status = is_position_opened(symbol, state.get("ticket"))
 
     if position_status is None:
-        print("⚠️ Could not determine position status due to MT5 error. Skipping cycle.")
+        print(f"⚠️ Could not determine position status for {symbol} due to MT5 error. Skipping cycle.")
         return
 
     if state["status"] == "open":
-        print(f"🟢 Detected open trade on {state['symbol']} (ticket={state.get('ticket')})")
+        print(f"🟢 Detected open trade on {symbol} (ticket={state.get('ticket')})")
         # Manage the open trade
         manage_active_trade(state)
         check_for_signal = False  # Don't open a new one
 
         # Optional: update status to idle if position closed
-        position_open = is_position_opened(state["symbol"], state.get("ticket"))
+        position_open = is_position_opened(symbol, state.get("ticket"))
         if position_open is False:
             print("✅ Trade is now closed — updating state to idle.")
             state["status"] = "idle"
-            save_trade_status(state)
+            save_trade_status(state, symbol)
 
     if check_for_signal:
-        print("🧠 Asking GPT for trade signal...")
-        signal = ask_gpt_for_signal()
+        print(f"🧠 Asking GPT for trade signal for {symbol} ...")
+        signal = ask_gpt_for_signal(symbol=symbol)
         if not signal:
             print("🛑 No actionable signal.")
             return
-        if  signal.get("signal") == "WAIT":
-            print(f"📈 GPT suggested signal: {signal}")
+        if signal.get("signal") == "WAIT":
+            print(f"📈 GPT suggested signal for {symbol}: {signal}")
             return
         
-        print(f"📈 GPT suggested signal: {signal}")
+        print(f"📈 GPT suggested signal for {symbol}: {signal}")
 
-        # After receiving `signal` from ask_gpt_for_signal()
         if not signal or "signal" not in signal or "symbol" not in signal:
             print("⚠️ GPT signal missing required keys! Raw output:", signal)
-            # Optionally send WAIT or log an error
             return
         trade_result = open_trade_in_mt5(signal)
 
@@ -97,7 +96,7 @@ def main_cycle():
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                 "ticket": getattr(trade_result, "order", None)
             }
-            save_trade_status(trade_state)
+            save_trade_status(trade_state, symbol)
         else:
             print("❌ Failed to open trade or unknown error.")
 

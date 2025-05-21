@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import os
 import time
 import numpy as np
+from core.rag_memory import TradeMemoryRAG
 
 from core.paths import COMPLETED_TRADES_FILE
 
@@ -52,31 +53,55 @@ def get_volatility_context(df):
 
 import json
 
-def get_win_loss_streak(logfile=COMPLETED_TRADES_FILE, n=10):
+def get_win_loss_streak(symbol="EURUSD", sample_size=10):
     """
-    Returns win/loss streak and basic stats from the last n trades.
+    Returns the win/loss streak and win rate for the specified symbol,
+    optionally over the last `sample_size` trades.
     """
     try:
-        with open(logfile, "r", encoding="utf-8") as f:
-            lines = f.readlines()[-n:]
-        results = [json.loads(line).get("result") for line in lines]
-        streak = []
-        for res in reversed(results):
-            if not streak or res == streak[-1]:
-                streak.append(res)
-            else:
-                break
-        win_rate = results.count("TP_hit") / len(results) if results else 0
+        # Update your trade memory/query logic to support per-symbol querying!
+        memory = TradeMemoryRAG()
+        cases = memory.query_cases(symbol=symbol, limit=sample_size)
+        # This part below is pseudocode—use your actual logic to process cases:
+        win_count = 0
+        streak_type = "N/A"
+        streak_length = 0
+        results = [case.get("result", "").lower() for case in cases]
+        # Compute streak and win rate logic here...
+        # (Assume 'WIN' if "result" field matches win criteria.)
+        if results:
+            win_count = sum("win" in res for res in results)
+            win_rate = win_count / len(results)
+            # Calculate streak_type and streak_length (custom logic)
+            last_type = None
+            current_streak = 0
+            for res in reversed(results):
+                this_type = "win" if "win" in res else "loss"
+                if last_type is None:
+                    last_type = this_type
+                if this_type == last_type:
+                    current_streak += 1
+                else:
+                    break
+            streak_type = last_type
+            streak_length = current_streak
+        else:
+            win_rate = 0.0
         return {
-            "streak_type": streak[0] if streak else None,
-            "streak_length": len(streak),
+            "streak_type": streak_type,
+            "streak_length": streak_length,
             "win_rate": win_rate,
-            "sample_size": len(results)
+            "sample_size": sample_size
         }
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ get_win_loss_streak() error for {symbol}: {e}")
         return {
-            "streak_type": None, "streak_length": 0, "win_rate": None, "sample_size": 0
+            "streak_type": "N/A",
+            "streak_length": 0,
+            "win_rate": 0.0,
+            "sample_size": sample_size
         }
+
 
 def encode_image_as_b64(path):
     if path and os.path.exists(path):

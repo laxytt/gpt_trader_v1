@@ -50,16 +50,39 @@ class TradeMemoryRAG:
         self._save_cases()
         self._build_index()
 
-    def query(self, context, k=3):
+    def query(self, context, k=3, symbol=None, oversample=10):
         """
         Returns the k most similar trade cases for the given context string.
+        If symbol is specified, only returns cases matching that symbol (case-insensitive).
+        Oversamples from index for better symbol-matching if dataset is large.
         """
         if not self.cases or not self.index or not context:
             return []
         emb = np.array(self.model.encode([context])).astype(np.float32)
-        D, I = self.index.search(emb, k)
+        D, I = self.index.search(emb, max(k * oversample, k))
         results = []
         for idx in I[0]:
             if 0 <= idx < len(self.cases):
-                results.append(self.cases[idx])
+                case = self.cases[idx]
+                if symbol:
+                    if case.get("symbol", "").upper() == symbol.upper():
+                        results.append(case)
+                else:
+                    results.append(case)
+                if len(results) >= k:
+                    break
         return results
+
+
+    def query_cases(self, symbol="EURUSD", limit=10):
+        """
+        Return the latest N cases for a given symbol.
+        """
+        # Suppose your memory has a list of case dicts as self.cases
+        cases = getattr(self, "cases", [])
+        # If not already loaded, you may need to load from file
+        if not cases and hasattr(self, "load_cases"):
+            cases = self.load_cases()
+        filtered = [case for case in cases if case.get("symbol", "").upper() == symbol.upper()]
+        filtered = sorted(filtered, key=lambda c: c.get("timestamp", ""), reverse=True)
+        return filtered[:limit]
