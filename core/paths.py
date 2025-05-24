@@ -1,25 +1,23 @@
+from pathlib import Path
 import os
+from config import MT5_FILES_DIR as MT5_FILES_DIR_FROM_CONFIG
 
-# Get the absolute path to the project root (gpt_trader_v1), regardless of current working directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Subdirectories and files
-DATA_DIR = os.path.join(BASE_DIR, "data")
-CORE_DIR = os.path.join(BASE_DIR, "core")
-SCREENSHOTS_DIR = os.path.join(BASE_DIR, "screenshots")
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
-SCRIPTS_DIR = os.path.join(BASE_DIR, "scripts")
+# Directories
+DATA_DIR = BASE_DIR / "data"
+CORE_DIR = BASE_DIR / "core"
+SCREENSHOTS_DIR = BASE_DIR / "screenshots"
+LOGS_DIR = BASE_DIR / "logs"
+SCRIPTS_DIR = BASE_DIR / "scripts"
 
-# Key files
-SCREENSHOT_TRIGGER_FILE = os.path.join(BASE_DIR, "trigger.txt")
-COMPLETED_TRADES_FILE = os.path.join(DATA_DIR, "completed_trades.jsonl")
-TRADE_STATUS_FILE = os.path.join(DATA_DIR, "trade_status.json")
-OPEN_TRADE_FILE = os.path.join(DATA_DIR, "open_trade.json")
-OPEN_TRADES_FILE = os.path.join(DATA_DIR,"open_trades.json")  
+# Files
+SCREENSHOT_TRIGGER_FILE = BASE_DIR / "trigger.txt"
+COMPLETED_TRADES_FILE = DATA_DIR / "completed_trades.jsonl"
+TRADE_STATUS_FILE = DATA_DIR / "trade_status.json"
+OPEN_TRADE_FILE = DATA_DIR / "open_trade.json"
+OPEN_TRADES_FILE = DATA_DIR / "open_trades.json"
 
-# Example screenshot files
-SCREENSHOT_PATH_H1 = os.path.join(SCREENSHOTS_DIR, "chart_EURUSD_H1.png")
-SCREENSHOT_PATH_H4 = os.path.join(SCREENSHOTS_DIR, "chart_EURUSD_H4.png")
-
-MT5_FILES_DIR = r"C:/Users/laxyt/AppData/Roaming/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Files"
-TRIGGER_PATH = os.path.join(MT5_FILES_DIR, "trigger.txt")
+# MT5 trigger path (shared file with MQL5 script)
+MT5_FILES_DIR = Path(MT5_FILES_DIR_FROM_CONFIG)
+TRIGGER_PATH = MT5_FILES_DIR / "trigger.txt"

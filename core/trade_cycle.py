@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 import time
 from core.gpt_interface import ask_gpt_for_signal
 from core.news_utils import NEWS_FILE
-from core.utils import is_file_fresh, log_resync
+from core.resync_logger import log_resync
+from core.utils import is_file_fresh
 from core.mt5_utils import (
     ensure_mt5_initialized,
     get_current_open_position,
@@ -44,4 +45,42 @@ def trade_cycle(symbol: str = "EURUSD"):
 
     # Zarządzanie istniejącą pozycją
     if local_trade["status"] == "open":
-        logger.info(f"Managing active trade
+        logger.info(f"Managing active trade for {symbol}")
+        manage_active_trade(local_trade)
+
+        if not is_position_opened(symbol, local_trade["ticket"]):
+            logger.info(f"Trade closed for {symbol}, updating state to idle.")
+            local_trade["status"] = "idle"
+            local_trade["timestamp"] = datetime.now(timezone.utc).isoformat()
+            save_trade_state(local_trade)
+        return
+
+    # Brak aktywnej pozycji – sprawdzamy nowy sygnał
+    logger.info(f"Requesting GPT signal for {symbol}")
+    signal = ask_gpt_for_signal(symbol=symbol)
+
+    if not signal or signal.get("signal") == "WAIT":
+        logger.info(f"No actionable signal for {symbol}. GPT recommendation: {signal}")
+        return
+
+    # Próba otwarcia transakcji w MT5
+    trade_result = open_trade_in_mt5(signal)
+
+    if trade_result and getattr(trade_result, "retcode", None) == 10009:
+        logger.info(f"Trade opened successfully for {symbol}.")
+        trade_state = {
+            "symbol": signal["symbol"],
+            "status": "open",
+            "side": signal["signal"],
+            "entry": signal["entry"],
+            "sl": signal["sl"],
+            "tp": signal["tp"],
+            "ticket": getattr(trade_result, "order"),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        save_trade_state(trade_state)
+    else:
+        logger.error(f"Failed to open trade for {symbol}. Response: {trade_result}")
+
+    # Krótki cooldown między cyklami
+    time.sleep(2)

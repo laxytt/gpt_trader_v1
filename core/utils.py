@@ -1,37 +1,17 @@
-import base64
-from datetime import datetime, timezone
 import os
 import time
-from core.trade_status import save_all_open_trades
+import base64
+from datetime import datetime, timezone
 import numpy as np
-from core.rag_memory import TradeMemoryRAG
-import MetaTrader5 as mt5
 
-from core.paths import COMPLETED_TRADES_FILE
+def is_file_fresh(path: str, max_age_sec: int = 120) -> bool:
+    return (
+        path and os.path.exists(path) and
+        os.path.getsize(path) > 0 and
+        (time.time() - os.path.getmtime(path)) < max_age_sec
+    )
 
-def log_resync(event, details, file_path="resync_log.txt"):
-    """
-    Logs a resynchronization event with timestamp, event type, and details.
-    """
-    with open(file_path, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now(timezone.utc).isoformat()} | {event} | {details}\n")
-
-def is_file_fresh(path, max_age_sec=120):
-    """
-    Checks if a file exists, is non-empty, and was modified within the last max_age_sec seconds.
-    """
-    if not path or not os.path.exists(path):
-        return False
-    if os.path.getsize(path) == 0:
-        return False
-    mtime = os.path.getmtime(path)
-    age = time.time() - mtime
-    return age < max_age_sec      
-
-def get_market_session(timestamp_utc):
-    """
-    Returns 'Asia', 'Europe', or 'NY' depending on UTC time.
-    """
+def get_market_session(timestamp_utc: datetime) -> str:
     hour = timestamp_utc.hour
     if 0 <= hour < 7:
         return "Asia"
@@ -40,10 +20,7 @@ def get_market_session(timestamp_utc):
     else:
         return "New York"
 
-def get_volatility_context(df):
-    """
-    Returns 'low', 'medium', or 'high' volatility based on ATR vs. historical mean.
-    """
+def get_volatility_context(df) -> str:
     recent_atr = df["atr14"].iloc[-1]
     mean_atr = df["atr14"].mean()
     if recent_atr < 0.7 * mean_atr:
@@ -53,73 +30,18 @@ def get_volatility_context(df):
     else:
         return "medium"
 
-import json
-
-def get_win_loss_streak(symbol="EURUSD", sample_size=10):
-    """
-    Returns the win/loss streak and win rate for the specified symbol,
-    optionally over the last `sample_size` trades.
-    """
-    try:
-        # Update your trade memory/query logic to support per-symbol querying!
-        memory = TradeMemoryRAG()
-        cases = memory.query_cases(symbol=symbol, limit=sample_size)
-        # This part below is pseudocode—use your actual logic to process cases:
-        win_count = 0
-        streak_type = "N/A"
-        streak_length = 0
-        results = [case.get("result", "").lower() for case in cases]
-        # Compute streak and win rate logic here...
-        # (Assume 'WIN' if "result" field matches win criteria.)
-        if results:
-            win_count = sum("win" in res for res in results)
-            win_rate = win_count / len(results)
-            # Calculate streak_type and streak_length (custom logic)
-            last_type = None
-            current_streak = 0
-            for res in reversed(results):
-                this_type = "win" if "win" in res else "loss"
-                if last_type is None:
-                    last_type = this_type
-                if this_type == last_type:
-                    current_streak += 1
-                else:
-                    break
-            streak_type = last_type
-            streak_length = current_streak
-        else:
-            win_rate = 0.0
-        return {
-            "streak_type": streak_type,
-            "streak_length": streak_length,
-            "win_rate": win_rate,
-            "sample_size": sample_size
-        }
-    except Exception as e:
-        print(f"⚠️ get_win_loss_streak() error for {symbol}: {e}")
-        return {
-            "streak_type": "N/A",
-            "streak_length": 0,
-            "win_rate": 0.0,
-            "sample_size": sample_size
-        }
-
-
-def encode_image_as_b64(path):
+def encode_image_as_b64(path: str) -> dict | None:
     if path and os.path.exists(path):
         with open(path, "rb") as img_file:
-            return {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{base64.b64encode(img_file.read()).decode('utf-8')}"}
-            }
+            b64 = base64.b64encode(img_file.read()).decode("utf-8")
+            return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
     return None
 
-def is_weekend():
-    return datetime.now(timezone.utc).weekday() in [5, 6]  # Saturday=5, Sunday=6
+def is_weekend() -> bool:
+    return datetime.now(timezone.utc).weekday() in [5, 6]
 
-def format_trade_case(trade, result, last_signal=None):
+def format_trade_case(trade: dict, result: str, last_signal: dict = None) -> dict:
     if last_signal:
-        # Best: Use enriched context from last_signal
         context = (
             f"EMA50={last_signal.get('ema50', '?')}, EMA200={last_signal.get('ema200', '?')}, "
             f"RSI={last_signal.get('rsi14', '?')}, Volume={last_signal.get('volume', '?')}, ATR={last_signal.get('atr14', '?')}"
@@ -134,7 +56,6 @@ def format_trade_case(trade, result, last_signal=None):
             "id": f"{trade.get('timestamp','')}_{trade.get('entry','')}"
         }
     else:
-        # Fallback: Use plain trade info (not as rich, but better than nothing)
         return {
             "context": f"Trade: {trade.get('side','?')} at {trade.get('entry','?')}, SL={trade.get('sl','?')}, TP={trade.get('tp','?')}",
             "signal": trade.get("side"),
@@ -144,7 +65,6 @@ def format_trade_case(trade, result, last_signal=None):
             "timestamp": trade.get("closed", trade.get("timestamp", "")),
             "id": f"{trade.get('timestamp','')}_{trade.get('entry','')}"
         }
-
 
 def np_encoder(obj):
     if isinstance(obj, (np.integer, np.int_, np.intc, np.intp, np.int8,
@@ -156,51 +76,3 @@ def np_encoder(obj):
     elif isinstance(obj, (np.ndarray,)):
         return obj.tolist()
     return str(obj)
-
-def sync_open_trades_from_mt5():
-    """Sync all open MT5 positions into open_trades.json for management."""
-    if not mt5.initialize():
-        print("❌ Could not initialize MT5 in sync.")
-        return
-    mt5_positions = mt5.positions_get()
-    open_trades = {}
-    if mt5_positions:
-        for pos in mt5_positions:
-            symbol = pos.symbol
-            open_trades[symbol] = {
-                "symbol": symbol,
-                "side": "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL",
-                "entry": pos.price_open,
-                "sl": pos.sl,
-                "tp": pos.tp,
-                "ticket": pos.ticket,
-                "status": "open",
-                "timestamp": datetime.fromtimestamp(pos.time).strftime("%Y-%m-%d %H:%M"),
-                "lots": pos.volume
-            }
-        save_all_open_trades(open_trades)
-        print("✅ Synced all open MT5 trades to open_trades.json.")
-    else:
-        print("No open trades to sync.")
-
-        import sys
-
-def print_section(title):
-    print("\n" + "="*60)
-    print(f"=== {title}")
-    print("="*60)
-
-def print_symbol_header(symbol, state):
-    ticket = state.get('ticket', '?')
-    status = state.get('status', '?')
-    lots = state.get('lots', '?')
-    side = state.get('side', '?')
-    entry = state.get('entry', '?')
-    print(f"\n----- {symbol} | State: {status} | Ticket: {ticket} | Side: {side} | Lots: {lots} | Entry: {entry} -----")
-
-
-def pretty_print_json_box(obj, title="GPT Management Suggestion"):
-    print("\n----- {} -----".format(title))
-    import json
-    print(json.dumps(obj, indent=2, ensure_ascii=False))
-    print("-"*60)

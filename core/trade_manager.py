@@ -4,84 +4,22 @@ import time
 from datetime import datetime, timezone
 import MetaTrader5 as mt5
 from core.gpt_interface import ask_gpt_for_reflection
+from core.gpt_trade_manager import ask_gpt_for_trade_management
 from core.logger import append_trade_to_file
 from core.paths import COMPLETED_TRADES_FILE, OPEN_TRADE_FILE
-from core.utils import format_trade_case, get_market_session, get_volatility_context, get_win_loss_streak, np_encoder
-from mt5_data import get_recent_candle_history_and_chart
+from core.utils import format_trade_case
 from core.mt5_utils import ensure_mt5_initialized
-from core.news_utils import get_upcoming_news
 import openai
-from core.rag_memory import TradeMemoryRAG
-import pandas as pd
+from core.database import memory
 
 MAGIC_NUMBER = 10032024
-
-client = openai.OpenAI()
-memory = TradeMemoryRAG()
-
-SYSTEM_PROMPT_MANAGE = """
-You are an expert algorithmic trade manager operating a VSA-based intraday strategy under strict FTMO risk management rules.
-
-**You are always given:**
-- Trade info (side, entry, SL, TP, RR, PnL, drawdown, time open).
-- Last 20 H1 candles (with indicators: EMA50, EMA200, RSI14, ATR14, rsi_slope).
-- Last 20 H4 candles (same indicators).
-- Latest market context (session, volatility, win/loss streak, news).
-- Upcoming macro news events (within next 30 minutes).
-
-**Your job:**
-- Analyze *both* H4 (for trend/background/major S/R) and H1 (for recent structure and trade progress).
-- Confirm the trade remains valid in context of VSA and current price/volume/indicator behavior.
-- Recommend **one** management action:  
-    - `"HOLD"` (keep position open, trend/logic intact)
-    - `"MOVE_SL"` (move stop-loss, e.g. to breakeven/ATR, only if justified)
-    - `"CLOSE_NOW"` (close immediately: trend reverses, adverse volume, or high-impact news imminent)
-
-**Decision logic:**
-- **HOLD**: Only if trade rationale and context remain valid per multi-timeframe VSA rules. Be conservative in “chop”/low ATR or after losing streaks.
-- **MOVE_SL**: If position is in profit and structure supports risk reduction (e.g., trail to breakeven after +1R, or ATR swing).
-- **CLOSE_NOW**: If trend is reversing, sudden volume spike against, major news within 2 minutes, or trade has timed out (open > 15 candles).
-
-**Always explain your rationale:**  
-State what you see in both H4 and H1, and why your action fits strict VSA/FTMO rules.
-
-**Output strict JSON only:**  
-{
-  "decision": "HOLD" | "MOVE_SL" | "CLOSE_NOW",
-  "reason": "Short explanation of rationale. Mention H4/H1 context, volume, structure, news if relevant.",
-  "risk_class": "A" | "B" | "C"
-}
-
-**Examples:**
-
-HOLD:
-{
-  "decision": "HOLD",
-  "reason": "H1 trend and VSA context unchanged; H4 uptrend intact; volume steady, no news risk.",
-  "risk_class": "A"
-}
-
-MOVE_SL:
-{
-  "decision": "MOVE_SL",
-  "reason": "Trade reached +1R, price above entry; H1 shows consolidation, H4 still in trend. Moving SL to breakeven.",
-  "risk_class": "B"
-}
-
-CLOSE_NOW:
-{
-  "decision": "CLOSE_NOW",
-  "reason": "High-impact news (NFP) in 1 minute; H4 and H1 both show mixed signals, closing to avoid event risk.",
-  "risk_class": "A"
-}
-"""
-
-
 TIER_RISK_MAPPING = {
     "A": 2.0,
     "B": 1.5,
     "C": 1.0
 }
+
+client = openai.OpenAI()
 
 def trade_timeout_check(open_time_str, max_candles=15, timeframe_minutes=5):
     """
@@ -204,114 +142,6 @@ def maybe_breakeven_adjustment(trade):
             save_open_trade(trade)
         else:
             print(f"❌ SL move failed: {getattr(result, 'retcode', None)} — {getattr(result, 'comment', '')}")
-
-def ask_gpt_for_trade_management(trade):
-    """
-    Uses both H1 and H4 data to generate robust management logic for open trades.
-    """
-    # Fetch both H1 and H4 candle histories
-    recent = get_recent_candle_history_and_chart(symbol=trade["symbol"])
-    
-    if recent.get("error"):
-        print(f"⛔ {recent['error']}. Unable to manage trade reliably, returning HOLD.")
-        return {
-            "decision": "HOLD",
-            "reason": f"Skipped management due to: {recent['error']} (stale/missing data/screenshots)",
-            "risk_class": "C"
-        }
-    
-    history_h1 = recent.get("history_h1", [])
-    history_h4 = recent.get("history_h4", [])
-    if not isinstance(history_h1, list) or len(history_h1) == 0:
-        print("⛔ No H1 candle history available. Returning HOLD.")
-        return {
-            "decision": "HOLD",
-            "reason": "No H1 candle history (data error)",
-            "risk_class": "C"
-        }
-    if not isinstance(history_h4, list) or len(history_h4) == 0:
-        print("⚠️ Warning: H4 candle history missing. Management may be less reliable.")
-
-    df_h1 = pd.DataFrame(history_h1)
-    df_h4 = pd.DataFrame(history_h4)
-    last_bar = df_h1.iloc[-1] if not df_h1.empty else None
-    now = datetime.now(timezone.utc)
-    session = get_market_session(now)
-    volatility = get_volatility_context(df_h1)
-    streak_info = get_win_loss_streak()
-
-    # Prepare scenario summaries
-    if last_bar is not None:
-        hold_summary = (
-            f"Price {last_bar['close']:.5f} near EMA50 ({last_bar['ema50']:.5f}), "
-            f"trend continues, no reversal signal."
-        )
-        move_sl_summary = (
-            f"Market structure has improved, potential to trail SL to breakeven or above last swing (ATR: {last_bar['atr14']:.5f}), RSI: {last_bar['rsi14']:.1f}."
-        )
-        close_now_summary = (
-            f"Sudden volume spike against position or major news approaching, "
-            f"risk of adverse move (Vol: {last_bar['volume']}), "
-            f"floating P/L: {trade.get('floating', 0.0):.1f}."
-        )
-    else:
-        hold_summary = move_sl_summary = close_now_summary = "Not enough data"
-
-    scenario_string = (
-        f"\nManagement context:\n"
-        f"- Time: {now.isoformat(timespec='seconds')}\n"
-        f"- Session: {session}\n"
-        f"- Volatility: {volatility}\n"
-        f"- Recent win/loss streak: {streak_info['streak_type']} ({streak_info['streak_length']})\n"
-        f"- Win rate (last {streak_info['sample_size']}): {streak_info['win_rate']:.1%}\n\n"
-        f"Available scenarios (based on H1):\n"
-        f"A) HOLD: {hold_summary}\n"
-        f"B) MOVE_SL: {move_sl_summary}\n"
-        f"C) CLOSE_NOW: {close_now_summary}\n\n"
-        f"Higher timeframe (H4) context is available for trend/background logic.\n"
-        f"Please choose the best scenario, explain your rationale in 1-2 sentences, "
-        f"and output your decision in JSON format as:\n"
-        '{\n  "decision": "HOLD"|"MOVE_SL"|"CLOSE_NOW",\n  "reason": "...",\n  "risk_class": "A"|"B"|"C"\n}\n'
-    )
-
-    market_context = {
-        "timestamp": last_bar["timestamp"] if last_bar is not None else None,
-        "price": last_bar["close"] if last_bar is not None else None,
-        "ema50": last_bar["ema50"] if last_bar is not None else None,
-        "ema200": last_bar["ema200"] if last_bar is not None else None,
-        "rsi14": last_bar["rsi14"] if last_bar is not None else None,
-        "atr14": last_bar["atr14"] if last_bar is not None else None,
-        "volume": last_bar["volume"] if last_bar is not None else None
-    }
-
-    payload = {
-        "trade": trade,
-        "market_h1": market_context,
-        "history_h1": history_h1,
-        "history_h4": history_h4,
-        "news": get_upcoming_news(within_minutes=30, symbol=trade["symbol"]),
-        "feedback": {
-            "floating_profit": trade.get("floating", 0.0),
-            "drawdown": trade.get("max_drawdown_pips", 0.0),
-            "time_open_minutes": trade.get("minutes_open", 0)
-        }
-    }
-
-    prompt_json = json.dumps(payload, indent=2, default=np_encoder)
-
-
-    response = client.chat.completions.create(
-        model="gpt-4.1-2025-04-14",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT_MANAGE},
-            {"role": "user", "content": scenario_string},
-            {"role": "user", "content": prompt_json}
-        ]
-    )
-
-    result = response.choices[0].message.content
-    print("🧠 GPT Management Suggestion:", result)
-    return json.loads(result)
 
 
 def close_position_now(trade):

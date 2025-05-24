@@ -137,3 +137,11 @@
 2025-05-21T19:00:12.155797+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
 2025-05-21T19:00:21.199534+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
 2025-05-21T19:00:31.612905+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
+2025-05-21T20:00:00.419822+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
+2025-05-21T20:00:06.147056+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
+2025-05-21T20:00:06.229996+00:00 | Local->Idle | ticket=59519159, symbol=GBPUSD
+2025-05-21T20:00:11.678146+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
+2025-05-21T20:00:16.990257+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
+2025-05-21T20:00:21.941284+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
+2025-05-21T20:00:27.165096+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'
+2025-05-21T20:00:31.962816+00:00 | Error | MT5 API error: get_current_open_position() got an unexpected keyword argument 'symbol'

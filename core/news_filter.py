@@ -1,43 +1,50 @@
+import logging
 from datetime import datetime, timedelta, timezone
-from core.news_utils import get_upcoming_news
+from core.news_utils import get_upcoming_news, parse_event_datetime
+from config import EVENT_BLACKLIST_BY_SYMBOL, EVENT_LOOKAHEAD_MINUTES
 
-# For production, consider loading this from config or file!
-RESTRICTED_EVENTS = [
-    "Federal Funds Rate", "FOMC Statement", "Non-Farm Employment Change",
-    "Unemployment Rate", "Average Hourly Earnings", "Advance GDP q/q",
-    "FOMC Meeting Minutes", "CPI y/y", "Main Refinancing Rate"
-]
+logger = logging.getLogger(__name__)
 
-def is_event_restricted(event, restricted_events=RESTRICTED_EVENTS):
+def is_event_restricted(event: dict, symbol: str) -> bool:
     """
-    Checks if the event title matches any in the restricted event list.
+    Check if the event's title matches a restricted pattern.
     """
+    blacklist = EVENT_BLACKLIST_BY_SYMBOL.get(symbol.upper(), [])
     title = event.get("title", "").lower()
-    return any(restricted.lower() in title for restricted in restricted_events)
+    return any(restricted.lower() in title for restricted in blacklist)
 
-def is_news_restricted_now(symbol, now=None, minutes_before=2, minutes_after=2, currencies=("USD", "EUR")):
+def is_news_restricted_now(
+    symbol: str,
+    now: datetime = None,
+    minutes_before: int = 2,
+    minutes_after: int = 2,
+    currencies: tuple[str] = ("USD", "EUR")
+) -> bool:
     """
     Returns True if a restricted macro event is within the danger window.
     """
     if now is None:
         now = datetime.now(timezone.utc)
 
-    news = get_upcoming_news(within_minutes=2880, now=now, currencies=currencies)  # large window
+    news = get_upcoming_news(
+        within_minutes=EVENT_LOOKAHEAD_MINUTES,
+        now=now,
+        symbol=symbol,
+        currencies=currencies
+    )
+
     for event in news:
-        event_time = None
         try:
-            # Expecting UTC-aware datetimes from news_utils
-            from core.news_utils import parse_event_datetime
             event_time = parse_event_datetime(event)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Could not parse event time: {e}")
             continue
+
         if not event_time:
             continue
 
-        # Check time window
         delta = (event_time - now).total_seconds() / 60
-        if -minutes_before <= delta <= minutes_after:
-            if is_event_restricted(event):
-                print(f"🚨 Restricted event '{event['title']}' within danger window ({delta:.1f} min).")
-                return True
+        if -minutes_before <= delta <= minutes_after and is_event_restricted(event, symbol):
+            logger.info(f"🚨 Restricted event '{event['title']}' within {delta:.1f} minutes of now.")
+            return True
     return False

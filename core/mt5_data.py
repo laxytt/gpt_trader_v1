@@ -2,7 +2,6 @@ from datetime import datetime
 import MetaTrader5 as mt5
 import pandas as pd
 from core.chart_utils import generate_chart_with_rsi_and_volume
-from core.paths import SCREENSHOT_PATH_H4, SCREENSHOT_PATH_H1
 import os
 import time
 import talib

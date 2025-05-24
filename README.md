@@ -1,170 +1,138 @@
-📈 GPT VSA Trading System — Complete Project Workflow
+# GPT Trading System
 
-Step-by-Step Process (with RAG, Reflection, Memory)
-1. Loop Start & Data Preparation
-Start main loop: Wait for next M5 candle close.
+A modular and intelligent intraday trading system powered by GPT-4 and Volume Spread Analysis (VSA), using real-time market data from MetaTrader 5 (MT5).
 
-Data pre-checks: News filter, calendar/data freshness, screenshot freshness.
+---
 
-Sync state: Load trade status, check MT5 for live trades. Heal if out-of-sync/corrupted.
+## 🚀 Features
 
-2. If Trade is Open: Management Branch
-Fetch M5 & H1 data, context, news.
+* **Signal Generation**
 
-Run GPT management:
+  * Multi-timeframe (H1 entry, H4 background)
+  * Momentum breakout + strict VSA confirmation
+  * GPT-4 vision with screenshot + indicators
 
-Inputs: open trade info, M5/H1 context, news, performance streak, feedback.
+* **Trade Management**
 
-Actions:
+  * Real-time GPT trade manager with HOLD / MOVE\_SL / CLOSE\_NOW logic
+  * Auto SL/TP updates and breakeven logic
+  * GPT reflection on trade outcomes
 
-HOLD: Keep position, maybe move SL to breakeven (auto if conditions met).
+* **News Filtering**
 
-MOVE_SL: Adjust stop-loss per model logic (e.g., ATR or BE).
+  * Per-symbol macro event blacklists
+  * Optional whitelist override
+  * Real-time JSON calendar parsing
 
-CLOSE_NOW: Immediate close if risk/trend/news/timeout triggers.
+* **Historical Memory**
 
-If trade is closed:
+  * RAG-like memory using FAISS + SentenceTransformer
+  * Stores trade cases with result, signal, context
 
-Log trade outcome.
+* **MT5 Integration**
 
-Add case to RAG memory (rag_memory.py) for future prompt retrieval.
+  * Candle fetch (H1/H4) with indicators
+  * Real screenshots via `trigger.txt`
+  * Order send, SL/TP modify, position sync
 
-Run GPT Reflection:
+---
 
-Inputs: trade summary, both M5/H1 context at trade time, outcome, context.
+## 🛠️ Project Structure
 
-GPT provides a human-style review (was the signal valid? How to improve?).
+```
+gpt_trader_v1/
+├── core/
+│   ├── chart_utils.py
+│   ├── gpt_interface.py
+│   ├── gpt_trade_manager.py
+│   ├── trade_cycle.py
+│   ├── trade_manager.py
+│   ├── market_data.py
+│   ├── rag_memory.py
+│   ├── news_filter.py
+│   ├── news_utils.py
+│   ├── database.py
+│   ├── paths.py
+│   └── utils.py
+├── data/               # SQLite DB, news cache, trade logs
+├── screenshots/        # MT5-generated images
+├── logs/
+├── scripts/            # Optional utility runners
+├── .env
+├── config.py
+└── trading_loop.py     # Main entrypoint
+```
 
-Append reflection to trade record.
+---
 
-Return state to idle.
+## ⚙️ Setup Instructions
 
-3. If No Trade is Open: Signal Generation Branch
-Fetch M5 & H1 data, screenshots, news, context, and win/loss streak.
+### 1. Clone & Create Environment
 
-Build prompt for GPT, including:
+```bash
+git clone https://github.com/yourname/gpt_trader_v1.git
+cd gpt_trader_v1
+python -m venv venv
+source venv/bin/activate  # or venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-M5 and H1 candles (with indicators)
+### 2. Configure `.env`
 
-Macroeconomic events
+```env
+OPENAI_API_KEY=your-key
+MT5_FILES_DIR=C:/.../MetaQuotes/.../MQL5/Files
+TELEGRAM_TOKEN=your-token
+TELEGRAM_CHAT_ID=your-chat-id
+```
 
-RAG: Up to 3 most similar historical trade cases retrieved from memory
+### 3. Launch Main Loop
 
-Session/volatility, performance context
+```bash
+$env:PYTHONPATH = "D:\gpt_trader_v1"
+python trading_loop.py
+```
 
-Run GPT signal:
+---
 
-WAIT: No action; log, loop resumes.
+## 🧠 Strategy Logic
 
-BUY/SELL:
+### Entry Signal
 
-Attempt to open trade in MT5.
+* **Momentum:** breakout to 10-bar high/low, impulse candle, strong trend (EMA+RSI)
+* **VSA:** No Demand/Supply, Test + Confirm, Shakeout, Upthrust etc.
+* **Volume & ATR**: must confirm
+* **Time & News Filters**: only during active sessions, skip high-impact events
 
-On success:
+### Trade Management
 
-Update state to open.
+* `HOLD` if context consistent
+* `MOVE_SL` after +1R or new structure
+* `CLOSE_NOW` on reversal, volatility spike, news in 2 min
 
-Trade is managed in next loop.
+---
 
-On failure:
+## 🧪 Developer Utilities
 
-Log error, skip.
+* `core/debug_utils.py` – pretty printing
+* `core/resync_logger.py` – file-based logs for trade state resync
+* `core/statistics.py` – win/loss streak & stats
 
-4. RAG Memory and Case Logging
-After every closed trade:
+---
 
-Format a trade case (indicators, context, signal, RR, reason, result, reflection).
+## 📊 Data Requirements
 
-Add to RAG vector store:
+* MetaTrader 5 with access to symbols like EURUSD, US30.cash, XAUUSD etc.
+* Installed Python packages: `MetaTrader5`, `openai`, `sentence-transformers`, `faiss`, `mplfinance`, `ta`, `pandas`
 
-Used for semantic retrieval in future prompts to help GPT “learn from experience.”
+---
 
-RAG used in every signal cycle:
+## ✅ TODO / Roadmap
 
-Query most similar past trade situations for context/risk calibration.
+*
 
-Passed into prompt to reinforce rule-based, data-driven learning.
+---
 
-5. Reflection Process
-After every closed trade:
+## 🧠 Credits
 
-GPT reviews trade outcome in context of strict VSA rules and multi-timeframe logic.
-
-Generates a brief reflection paragraph:
-
-Was signal valid?
-
-Did trade follow all rules (background, confirmation, risk, news filter)?
-
-What could be improved?
-
-Reflection is logged to file/memory for future analysis.
-
-6. Logging & Notifications
-All trades, outcomes, management actions, errors are logged.
-
-Optionally, key events and errors are sent to Telegram for real-time monitoring.
-
-All Scenarios
-Trade Open:
-
-Managed every cycle by GPT, using current M5/H1 context, news, and RAG.
-
-Possible actions: HOLD, MOVE_SL, CLOSE_NOW.
-
-Any closure triggers logging, RAG memory update, and reflection.
-
-No Trade Open:
-
-GPT analyzes context, retrieves past similar cases, and signals WAIT, BUY, or SELL.
-
-WAIT → skip.
-
-BUY/SELL → order sent; on success, tracked as open position.
-
-News or data not fresh:
-
-Skips trading until safe.
-
-Corrupted/missing files:
-
-Attempts auto-heal/reset, always logs.
-
-Errors/failures:
-
-Always logs and skips cycle (never crashes loop).
-
-[Main Loop]
-   │
-   ├─► [Pre-checks: News, Calendar, Data Freshness]
-   │
-   ├─► [State Management (MT5 sync)]
-   │
-   ├─► Trade Open?
-   │       │
-   │    Yes│No
-   │       ▼
-   │ [Trade Management (GPT)]
-   │   │      │
-   │ HOLD  MOVE_SL  CLOSE_NOW
-   │   │      │         │
-   │   └──────┴─────────┘
-   │          │
-   │   [If closed:]
-   │      │
-   │   [Log, Add to RAG, Reflect]
-   │      │
-   │   [State Idle]
-   │
-   └─► [Signal Generation (GPT)]
-           │
-     ┌─────┼─────┐
-   WAIT  BUY/SELL
-     │      │
-   Loop   [Open trade in MT5]
-            │
-         [Success?]
-         │       │
-       Yes      No
-       │         │
-   [State Open]  [Log, skip]
+Developed by Wiktor Kukulski with modular GPT-4 integration and a deep respect for market context. ☕

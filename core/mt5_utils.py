@@ -3,7 +3,8 @@ import MetaTrader5 as mt5
 import time
 import logging
 import pandas as pd
-from core.trade_status import load_all_open_trades, save_all_open_trades
+import talib
+from core.database import save_trade_state
 
 # Configure logging (recommended for all modules)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -105,7 +106,7 @@ def calculate_lot_size(entry, sl, risk_usd, symbol, spread_pips=1.0, commission_
 
 def open_trade_in_mt5(signal, risk_usd=15):
     """
-    Opens a trade based on the GPT signal and saves it to multi-symbol open trades file.
+    Opens a trade based on the GPT signal and saves it to the database.
     Returns the MT5 order_send result or None on failure.
     """
     if not ensure_mt5_initialized():
@@ -118,15 +119,14 @@ def open_trade_in_mt5(signal, risk_usd=15):
     side = signal["signal"]
 
     spread_pips = get_symbol_spread(symbol) or 1.0
-    commission_per_lot = 7.0  # Replace if needed
+    commission_per_lot = 7.0
 
     lot_size = calculate_lot_size(entry, sl, risk_usd, symbol, spread_pips, commission_per_lot)
-
     if lot_size <= 0:
         print("❌ Lot size is zero or negative—trade skipped!")
         return None
 
-    # Direction: 0=buy, 1=sell
+    # Direction
     if side == "BUY":
         order_type = mt5.ORDER_TYPE_BUY
         price = mt5.symbol_info_tick(symbol).ask
@@ -152,38 +152,49 @@ def open_trade_in_mt5(signal, risk_usd=15):
     result = mt5.order_send(request)
     if hasattr(result, "retcode") and result.retcode == mt5.TRADE_RETCODE_DONE:
         print(f"✅ Trade opened for {symbol}: {side} {lot_size} lots @ {price}")
-
-        # --- Save open trade in multi-symbol state ---
-        open_trades = load_all_open_trades()
-        open_trades[symbol] = {
+        
+        # Save to database (instead of open_trades.json)
+        trade = {
             "symbol": symbol,
             "side": side,
             "entry": price,
             "sl": sl,
             "tp": tp,
-            "ticket": getattr(result, "order", None) or getattr(result, "order_ticket", None),
             "status": "open",
+            "ticket": getattr(result, "order", None) or getattr(result, "order_ticket", None),
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
             "lots": lot_size
-            # You can add more fields if needed (risk, RR, GPT reasoning, etc.)
         }
-        save_all_open_trades(open_trades)
-
+        save_trade_state(trade)
         return result
+
     else:
         print(f"❌ Failed to open trade: {getattr(result, 'retcode', None)} - {getattr(result, 'comment', '')}")
         return result
-
-
-def get_current_open_position():
+    
+def get_current_open_position(symbol=None):
     """
-    Returns a dict with the current open position's details, or None if none.
+    Returns a dict with the current open position's details for the given symbol,
+    or the first open position if symbol is None.
     """
     if not ensure_mt5_initialized():
         return None
     positions = mt5.positions_get()
     if not positions:
         return None
+    if symbol:
+        for pos in positions:
+            if pos.symbol == symbol:
+                return {
+                    "symbol": pos.symbol,
+                    "side": "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL",
+                    "entry": pos.price_open,
+                    "sl": pos.sl,
+                    "tp": pos.tp,
+                    "ticket": pos.ticket
+                }
+        return None  # No open trade for this symbol
+    # If symbol not given, return first
     pos = positions[0]
     return {
         "symbol": pos.symbol,
@@ -193,11 +204,6 @@ def get_current_open_position():
         "tp": pos.tp,
         "ticket": pos.ticket
     }
-
-import MetaTrader5 as mt5
-import pandas as pd
-import talib
-import logging
 
 logger = logging.getLogger("gpt_trader.prefilter")
 

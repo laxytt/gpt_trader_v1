@@ -1,10 +1,10 @@
 import os
-from core.rag_memory import TradeMemoryRAG
+from core.database import memory  # ✅ to jest prawidłowa instancja
+
 import json
 import sys
 
 def main():
-    memory = TradeMemoryRAG()
 
     if not os.path.exists("closed_trades.json"):
         print("❌ closed_trades.json not found.")
