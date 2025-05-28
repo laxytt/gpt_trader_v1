@@ -20,7 +20,6 @@ from core.infrastructure.mt5.data_provider import MT5DataProvider
 from core.infrastructure.mt5.order_manager import MT5OrderManager
 from core.infrastructure.gpt.client import GPTClient
 from core.infrastructure.gpt.signal_generator import GPTSignalGenerator
-from core.infrastructure.gpt.reflection_generator import GPTReflectionGenerator
 from core.infrastructure.database.repositories import (
     TradeRepository, SignalRepository, MemoryCaseRepository
 )
@@ -50,7 +49,12 @@ class DependencyContainer:
     def get_or_create(self, component_name: str, factory_func):
         """Get existing instance or create new one"""
         if component_name not in self._instances:
-            self._instances[component_name] = factory_func()
+            try:
+                self._instances[component_name] = factory_func()
+                logger.info(f"✅ Created component: {component_name}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create {component_name}: {e}")
+                raise
         return self._instances[component_name]
     
     # Infrastructure Components
@@ -117,14 +121,6 @@ class DependencyContainer:
         """Create GPT signal generator"""
         return self.get_or_create('signal_generator',
             lambda: GPTSignalGenerator(
-                self.gpt_client(),
-                prompts_dir="config/prompts"
-            ))
-    
-    def reflection_generator(self) -> GPTReflectionGenerator:
-        """Create GPT reflection generator"""
-        return self.get_or_create('reflection_generator',
-            lambda: GPTReflectionGenerator(
                 self.gpt_client(),
                 prompts_dir="config/prompts"
             ))

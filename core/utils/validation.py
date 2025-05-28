@@ -430,21 +430,7 @@ class InputSanitizer:
         Raises:
             ValidationError: If symbol is invalid
         """
-        if not symbol or not isinstance(symbol, str):
-            raise ValidationError("Symbol must be a non-empty string")
-        
-        # Remove whitespace and convert to uppercase
-        clean_symbol = symbol.strip().upper()
-        
-        # Validate format (alphanumeric plus dots and underscores)
-        if not re.match(r'^[A-Z0-9._]+$', clean_symbol):
-            raise ValidationError(f"Invalid symbol format: {symbol}")
-        
-        # Length validation
-        if len(clean_symbol) < 2 or len(clean_symbol) > 20:
-            raise ValidationError(f"Symbol length must be 2-20 characters: {symbol}")
-        
-        return clean_symbol
+        return SymbolValidator.validate_and_sanitize(symbol)
     
     @staticmethod
     def sanitize_price(price: Any) -> float:
@@ -505,6 +491,62 @@ class InputSanitizer:
         
         return data
 
+class SymbolValidator:
+    """Centralized symbol validation"""
+    
+    VALID_SYMBOL_PATTERN = re.compile(r'^[A-Z0-9._]+$')
+    MIN_SYMBOL_LENGTH = 2
+    MAX_SYMBOL_LENGTH = 20
+    
+    @classmethod
+    def validate_and_sanitize(cls, symbol: str) -> str:
+        """
+        Validate and sanitize trading symbol.
+        
+        Args:
+            symbol: Raw symbol string
+            
+        Returns:
+            Sanitized and validated symbol
+            
+        Raises:
+            ValidationError: If symbol is invalid
+        """
+        if not symbol or not isinstance(symbol, str):
+            raise ValidationError("Symbol must be a non-empty string")
+        
+        # Sanitize: remove whitespace and convert to uppercase
+        clean_symbol = symbol.strip().upper()
+        
+        # Validate format
+        if not cls.VALID_SYMBOL_PATTERN.match(clean_symbol):
+            raise ValidationError(f"Invalid symbol format: {symbol}")
+        
+        # Validate length
+        if len(clean_symbol) < cls.MIN_SYMBOL_LENGTH:
+            raise ValidationError(f"Symbol too short: {symbol}")
+        
+        if len(clean_symbol) > cls.MAX_SYMBOL_LENGTH:
+            raise ValidationError(f"Symbol too long: {symbol}")
+        
+        return clean_symbol
+    
+    @classmethod
+    def is_valid(cls, symbol: str) -> bool:
+        """
+        Check if symbol is valid without raising exceptions.
+        
+        Args:
+            symbol: Symbol to check
+            
+        Returns:
+            True if valid, False otherwise
+        """
+        try:
+            cls.validate_and_sanitize(symbol)
+            return True
+        except ValidationError:
+            return False
 
 # Validation helper functions
 def validate_risk_parameters(
@@ -555,7 +597,7 @@ def validate_symbol_format(symbol: str) -> bool:
     Raises:
         ValidationError: If symbol format is invalid
     """
-    InputSanitizer.sanitize_symbol(symbol)
+    SymbolValidator.validate_and_sanitize(symbol)
     return True
 
 

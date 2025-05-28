@@ -201,12 +201,14 @@ class ChartGenerator:
         return chart_data
     
     def _create_additional_plots(
-        self, 
-        df: pd.DataFrame, 
-        include_rsi: bool = True
-    ) -> List:
+    self, 
+    df: pd.DataFrame, 
+    include_rsi: bool = True
+) -> List:
         """Create additional plots for indicators"""
         additional_plots = []
+        panel_assignments = {'main': 0}  # Track which panel number to use
+        current_panel = 1  # Start with panel 1 for additional panels
         
         # Add EMAs to main panel
         if 'ema50' in df.columns:
@@ -233,15 +235,19 @@ class ChartGenerator:
                     )
                 )
         
-        # Add RSI to separate panel
+        # Only add RSI if requested AND data exists
         if include_rsi and 'rsi14' in df.columns:
             rsi_data = df['rsi14'].dropna()
-            if not rsi_data.empty:
+            if not rsi_data.empty and len(rsi_data) > 0:
+                # Volume takes panel 1 if included, so RSI goes to panel 2
+                # If no volume, RSI goes to panel 1
+                rsi_panel = 2 if self.default_style.get('volume', True) else 1
+                
                 additional_plots.append(
                     mpf.make_addplot(
                         rsi_data,
                         color=self.colors['rsi'],
-                        panel=2,
+                        panel=rsi_panel,
                         ylabel='RSI',
                         ylim=(0, 100),
                         secondary_y=False
@@ -253,8 +259,8 @@ class ChartGenerator:
                 rsi_30 = pd.Series([30] * len(rsi_data), index=rsi_data.index)
                 
                 additional_plots.extend([
-                    mpf.make_addplot(rsi_70, color='red', linestyle='--', width=0.5, panel=2),
-                    mpf.make_addplot(rsi_30, color='green', linestyle='--', width=0.5, panel=2)
+                    mpf.make_addplot(rsi_70, color='red', linestyle='--', width=0.5, panel=rsi_panel),
+                    mpf.make_addplot(rsi_30, color='green', linestyle='--', width=0.5, panel=rsi_panel)
                 ])
         
         return additional_plots
@@ -263,18 +269,26 @@ class ChartGenerator:
         """Get style configuration for the chart"""
         config = self.default_style.copy()
         
-        # Adjust panel ratios based on what's included
-        if include_volume and include_rsi:
+        # Count the number of panels we'll actually have
+        panel_count = 1  # Main price panel always exists
+        if include_volume:
+            panel_count += 1
+        if include_rsi:
+            panel_count += 1
+        
+        # Set panel ratios based on actual panels
+        if panel_count == 1:
+            config['panel_ratios'] = (1,)
+        elif panel_count == 2:
+            if include_volume:
+                config['panel_ratios'] = (4, 1)  # Main, Volume
+            else:
+                config['panel_ratios'] = (4, 1)  # Main, RSI
+        elif panel_count == 3:
             config['panel_ratios'] = (6, 2, 2)  # Main, Volume, RSI
-        elif include_volume:
-            config['panel_ratios'] = (4, 1)     # Main, Volume
-        elif include_rsi:
-            config['panel_ratios'] = (4, 1)     # Main, RSI
-        else:
-            config['panel_ratios'] = (1,)       # Main only
         
         config['volume'] = include_volume
-        
+    
         return config
     
     def _add_vsa_indicators(self, df: pd.DataFrame) -> pd.DataFrame:

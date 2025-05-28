@@ -4,25 +4,26 @@ Handles trade execution, monitoring, and management decisions.
 """
 
 import logging
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 
 from core.domain.models import (
-    Trade, TradingSignal, TradeManagementDecision, TradeStatus, 
-    TradeResult, ManagementDecision, SignalType
+    RiskClass, Trade, TradingSignal, TradeManagementDecision, TradeStatus, 
+    TradeResult, ManagementDecision
 )
 from core.domain.exceptions import (
-    TradeExecutionError, TradeManagementError, ErrorContext,
+    TradeExecutionError, ErrorContext,
     RiskManagementError
 )
 from core.infrastructure.mt5.order_manager import MT5OrderManager
 from core.infrastructure.gpt.client import GPTClient
 from core.infrastructure.database.repositories import TradeRepository
+from core.infrastructure.gpt.reflection_generator import GPTReflectionGenerator
 from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
 from core.utils.validation import TradeValidator
 from config.settings import TradingSettings
-from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
@@ -278,6 +279,7 @@ class TradeService:
         
         # Initialize components
         self.management_analyzer = TradeManagementAnalyzer(gpt_client)
+        self.reflection_generator = GPTReflectionGenerator(gpt_client)  # Add this
         self.validator = TradeValidator()
         
         # Trade timeout configuration
@@ -492,10 +494,27 @@ class TradeService:
         
         await self._finalize_trade(trade)
     
+    # Update the _finalize_trade method
     async def _finalize_trade(self, trade: Trade):
         """Finalize a completed trade"""
         trade.status = TradeStatus.CLOSED
         trade.exit_timestamp = datetime.now(timezone.utc)
+        
+        # Generate reflection for the trade
+        try:
+            reflection = await self.reflection_generator.generate_reflection(
+                trade=trade,
+                h1_data=None,  # Could fetch current market data if needed
+                h4_data=None,
+                additional_context={
+                    'trade_duration': trade.duration_minutes,
+                    'market_conditions': 'current'  # Could add more context
+                }
+            )
+            trade.reflection = reflection
+        except Exception as e:
+            logger.warning(f"Failed to generate reflection for trade {trade.id}: {e}")
+            trade.reflection = None
         
         # Save to repository
         self.trade_repository.save(trade)

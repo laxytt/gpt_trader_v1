@@ -226,9 +226,27 @@ class MT5Client:
             return None
             
         try:
-            rates = mt5.copy_rates_from_pos(symbol, timeframe.value, start_pos, count)
+            # Get the numeric value for MT5
+            timeframe_value = timeframe.value if hasattr(timeframe, 'value') else timeframe
+            
+            rates = mt5.copy_rates_from_pos(symbol, timeframe_value, start_pos, count)
+            
             if rates is not None and len(rates) > 0:
-                return [dict(rate) for rate in rates]
+                # Convert numpy array to list of dictionaries properly
+                result = []
+                for rate in rates:
+                    rate_dict = {
+                        'time': int(rate[0]),
+                        'open': float(rate[1]),
+                        'high': float(rate[2]),
+                        'low': float(rate[3]),
+                        'close': float(rate[4]),
+                        'tick_volume': int(rate[5]),
+                        'spread': int(rate[6]),
+                        'real_volume': int(rate[7])
+                    }
+                    result.append(rate_dict)
+                return result
             else:
                 logger.warning(f"No rates data for {symbol} {timeframe}")
                 return None

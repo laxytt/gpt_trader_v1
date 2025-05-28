@@ -22,6 +22,7 @@ from core.infrastructure.database.repositories import SignalRepository
 from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
 from core.utils.chart_utils import ChartGenerator, create_market_data_chart
+from core.utils.error_handling import with_error_recovery
 from core.utils.validation import SignalValidator
 from config.settings import TradingSettings
 
@@ -252,6 +253,7 @@ class SignalService:
             logger.warning(f"News check failed for {symbol}: {e}")
             return []  # Continue without news data
     
+    @with_error_recovery(default_return=None, log_level='warning')
     async def _generate_charts(
         self, 
         symbol: str, 
@@ -261,61 +263,56 @@ class SignalService:
         if not self.chart_generator:
             return None
         
-        try:
-            chart_paths = {}
+        chart_paths = {}
+        
+        for timeframe, data in market_data.items():
+            chart_filename = f"{symbol}_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            chart_path = self.screenshots_dir / chart_filename
             
-            for timeframe, data in market_data.items():
-                chart_filename = f"{symbol}_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                chart_path = self.screenshots_dir / chart_filename
-                
-                generated_path = create_market_data_chart(
-                    market_data=data,
-                    output_path=str(chart_path),
-                    title=f"{symbol} {timeframe}"
-                )
-                
-                if generated_path:
-                    chart_paths[timeframe.lower()] = generated_path
+            # Use the new chart service
+            from core.services.chart_service import ChartService
+            chart_service = ChartService(self.chart_generator)
             
-            return chart_paths if chart_paths else None
+            generated_path = chart_service.generate_market_chart(
+                market_data=data,
+                output_path=str(chart_path),
+                title=f"{symbol} {timeframe}"
+            )
             
-        except Exception as e:
-            logger.warning(f"Chart generation failed for {symbol}: {e}")
-            return None
+            if generated_path:
+                chart_paths[timeframe.lower()] = generated_path
+        
+        return chart_paths if chart_paths else None
     
+    @with_error_recovery(default_return=[], log_level='warning')
     async def _get_historical_context(
         self, 
         symbol: str, 
         h1_data: MarketData
     ) -> List[Dict[str, Any]]:
         """Get historical trade cases for context"""
-        try:
-            if not h1_data.candles:
-                return []
-            
-            # Create context from current market conditions
-            latest_candle = h1_data.latest_candle
-            if not latest_candle:
-                return []
-            
-            context_text = (
-                f"EMA50={latest_candle.ema50:.5f}, EMA200={latest_candle.ema200:.5f}, "
-                f"RSI={latest_candle.rsi14:.1f}, Volume={latest_candle.volume}, "
-                f"ATR={latest_candle.atr14:.5f}"
-            )
-            
-            # Query similar historical cases
-            similar_cases = await self.memory_service.find_similar_cases(
-                context=context_text,
-                symbol=symbol,
-                limit=3
-            )
-            
-            return similar_cases
-            
-        except Exception as e:
-            logger.warning(f"Historical context retrieval failed for {symbol}: {e}")
+        if not h1_data.candles:
             return []
+        
+        # Create context from current market conditions
+        latest_candle = h1_data.latest_candle
+        if not latest_candle:
+            return []
+        
+        context_text = (
+            f"EMA50={latest_candle.ema50:.5f}, EMA200={latest_candle.ema200:.5f}, "
+            f"RSI={latest_candle.rsi14:.1f}, Volume={latest_candle.volume}, "
+            f"ATR={latest_candle.atr14:.5f}"
+        )
+        
+        # Query similar historical cases
+        similar_cases = await self.memory_service.find_similar_cases(
+            context=context_text,
+            symbol=symbol,
+            limit=3
+        )
+        
+        return similar_cases
     
     async def _store_signal(self, signal: TradingSignal):
         """Store signal in repository"""
@@ -347,8 +344,8 @@ class SignalService:
             True if symbol is ready for analysis
         """
         try:
-            # Check data availability
-            has_data = self.data_provider.validate_symbol_data(symbol, TimeFrame.H1)
+            # Check data availability - properly await the async call
+            has_data = await self.data_provider.validate_symbol_data(symbol, TimeFrame.H1)
             if not has_data:
                 logger.warning(f"Insufficient data for {symbol}")
                 return False

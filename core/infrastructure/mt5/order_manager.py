@@ -11,7 +11,7 @@ from core.infrastructure.mt5.client import MT5Client
 from core.domain.models import Trade, TradingSignal, TradeStatus, SignalType
 from core.domain.exceptions import (
     MT5OrderError, TradeExecutionError, RiskManagementError,
-    ErrorContext, ErrorMessages
+    ErrorContext, ErrorMessages, InsufficientFundsError
 )
 from core.domain.enums import (
     OrderType, TradeAction, ReturnCode, TradingConstants,
@@ -190,19 +190,37 @@ class MT5OrderManager:
     
     def _build_order_request(self, signal: TradingSignal, lot_size: float) -> Dict[str, Any]:
         """Build MT5 order request from signal"""
-        
-        # Get current prices
+    
+        # Get current prices with proper error handling
         tick = self.mt5_client.get_symbol_tick(signal.symbol)
         if not tick:
             raise TradeExecutionError(f"Cannot get current price for {signal.symbol}")
         
+        # Validate tick data
+        if 'ask' not in tick or 'bid' not in tick:
+            raise TradeExecutionError(f"Invalid tick data for {signal.symbol}: missing bid/ask")
+        
+        ask_price = tick.get('ask')
+        bid_price = tick.get('bid')
+        
+        if ask_price is None or bid_price is None or ask_price <= 0 or bid_price <= 0:
+            raise TradeExecutionError(f"Invalid prices for {signal.symbol}: ask={ask_price}, bid={bid_price}")
+        
         # Determine order type and price
         if signal.signal == SignalType.BUY:
             order_type = OrderType.BUY
-            price = tick['ask']
+            price = ask_price
         else:
             order_type = OrderType.SELL
-            price = tick['bid']
+            price = bid_price
+        
+        # Validate price against signal levels
+        if signal.signal == SignalType.BUY:
+            if price > signal.entry * 1.01:  # 1% slippage tolerance
+                logger.warning(f"Current price {price} significantly above signal entry {signal.entry}")
+        else:
+            if price < signal.entry * 0.99:  # 1% slippage tolerance
+                logger.warning(f"Current price {price} significantly below signal entry {signal.entry}")
         
         # Build request
         request = {

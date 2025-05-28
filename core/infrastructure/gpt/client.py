@@ -6,7 +6,7 @@ Handles API calls, rate limiting, error handling, and response processing.
 import json
 import logging
 import time
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 import asyncio
 import tiktoken
@@ -16,7 +16,7 @@ from openai import OpenAI
 
 from config.settings import GPTSettings
 from core.domain.exceptions import (
-    GPTError, GPTAPIError, GPTResponseError, TimeoutError,
+    GPTAPIError, GPTResponseError, TimeoutError,
     ErrorContext, ErrorMessages
 )
 from core.domain.enums import GPTModels

@@ -239,65 +239,7 @@ class MT5DataProvider:
                 logger.error(f"Failed to get data for {symbol} {tf}: {e}")
                 # Continue with other timeframes
         
-        return result
-    
-    def generate_chart(
-        self, 
-        market_data: MarketData, 
-        output_path: str,
-        title: Optional[str] = None
-    ) -> Optional[str]:
-        """
-        Generate chart from market data.
-        
-        Args:
-            market_data: Market data to chart
-            output_path: Path to save chart
-            title: Optional chart title
-            
-        Returns:
-            Path to generated chart or None if failed
-        """
-        if not self.chart_generator:
-            logger.warning("No chart generator configured")
-            return None
-        
-        try:
-            # Convert candles back to DataFrame for charting
-            df = self._candles_to_dataframe(market_data.candles)
-            
-            chart_title = title or f"{market_data.symbol} {market_data.timeframe}"
-            
-            return self.chart_generator.generate_chart_with_indicators(
-                df=df,
-                output_path=output_path,
-                title=chart_title
-            )
-            
-        except Exception as e:
-            logger.error(f"Chart generation failed: {e}")
-            return None
-    
-    def _candles_to_dataframe(self, candles: List[Candle]) -> pd.DataFrame:
-        """Convert list of Candle objects back to DataFrame"""
-        data = []
-        for candle in candles:
-            data.append({
-                'timestamp': candle.timestamp,
-                'open': candle.open,
-                'high': candle.high,
-                'low': candle.low,
-                'close': candle.close,
-                'volume': candle.volume,
-                'ema50': candle.ema50,
-                'ema200': candle.ema200,
-                'rsi14': candle.rsi14,
-                'atr14': candle.atr14
-            })
-        
-        df = pd.DataFrame(data)
-        df.set_index('timestamp', inplace=True)
-        return df
+        return result 
     
     def get_current_price(self, symbol: str) -> Optional[Dict[str, float]]:
         """
@@ -371,7 +313,7 @@ class MT5DataProvider:
         else:
             return "medium"
     
-    def validate_symbol_data(self, symbol: str, timeframe: TimeFrame) -> bool:
+    async def validate_symbol_data(self, symbol: str, timeframe: TimeFrame) -> bool:
         """
         Validate that symbol has sufficient data for analysis.
         
@@ -383,7 +325,7 @@ class MT5DataProvider:
             bool: True if symbol has sufficient data
         """
         try:
-            market_data = self.get_market_data(symbol, timeframe, bars=self.min_required_bars)
+            market_data = await self.get_market_data(symbol, timeframe, bars=self.min_required_bars)
             return len(market_data.candles) >= self.min_required_bars
         except Exception:
             return False
