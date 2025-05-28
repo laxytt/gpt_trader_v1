@@ -224,6 +224,8 @@ class TradingOrchestrator:
         self.last_cycle_time = None
         self.error_count = 0
         self.max_errors = 10
+        self._shutdown_requested = False  # Add this missing attribute
+
         
         # Statistics
         self.stats = {
