@@ -235,6 +235,7 @@ class TradingOrchestrator:
             'start_time': None
         }
     
+    
     async def run(self):
         """
         Main trading loop that runs continuously.
@@ -246,7 +247,7 @@ class TradingOrchestrator:
             self.state = TradingState.RUNNING
             self.stats['start_time'] = datetime.now(timezone.utc).isoformat()
             
-            while self.state == TradingState.RUNNING:
+            while self.state == TradingState.RUNNING and not self._shutdown_requested:
                 try:
                     # Check if we should trade now
                     if not self._should_trade_now():
@@ -256,8 +257,8 @@ class TradingOrchestrator:
                     # Execute trading cycle
                     await self._execute_trading_cycle()
                     
-                    # Wait until next cycle
-                    await self.scheduler.wait_for_next_hour_boundary()
+                    # Wait until next cycle (with periodic checks for shutdown)
+                    await self._wait_with_shutdown_check()
                     
                 except KeyboardInterrupt:
                     logger.info("🛑 Received interrupt signal, stopping...")
@@ -272,12 +273,33 @@ class TradingOrchestrator:
                         self.state = TradingState.ERROR
                         break
             
+            logger.info("🔄 Trading loop ended")
+            
+        except KeyboardInterrupt:
+            logger.info("🛑 Keyboard interrupt received")
         except Exception as e:
             logger.exception(f"💥 Fatal error in trading orchestrator: {e}")
             self.state = TradingState.ERROR
         
         finally:
             await self._shutdown_system()
+
+    
+    async def _wait_with_shutdown_check(self):
+        """Wait until next hour boundary while checking for shutdown requests"""
+        now = datetime.now(timezone.utc)
+        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        wait_time = (next_hour - now).total_seconds()
+        
+        if wait_time > 0:
+            logger.info(f"⏳ Waiting {wait_time:.1f} seconds until next hour boundary")
+            
+            # Wait in small increments to check for shutdown
+            while wait_time > 0 and self.state == TradingState.RUNNING and not self._shutdown_requested:
+                sleep_time = min(10, wait_time)  # Check every 10 seconds
+                await asyncio.sleep(sleep_time)
+                wait_time -= sleep_time
+    
     
     async def _initialize_system(self):
         """Initialize all system components"""

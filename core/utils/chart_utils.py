@@ -65,32 +65,17 @@ class ChartGenerator:
         }
     
     def generate_chart_with_indicators(
-        self,
-        df: pd.DataFrame,
-        output_path: str,
-        title: str = "Market Analysis",
-        include_volume: bool = True,
-        include_rsi: bool = True,
-        width: int = 1200,
-        height: int = 800
+    self,
+    df: pd.DataFrame,
+    output_path: str,
+    title: str = "Market Analysis",
+    include_volume: bool = True,
+    include_rsi: bool = True,
+    width: int = 1200,
+    height: int = 800
     ) -> str:
         """
         Generate candlestick chart with technical indicators.
-        
-        Args:
-            df: DataFrame with OHLCV data and indicators
-            output_path: Path to save the chart
-            title: Chart title
-            include_volume: Whether to include volume panel
-            include_rsi: Whether to include RSI panel
-            width: Chart width in pixels
-            height: Chart height in pixels
-            
-        Returns:
-            Path to generated chart file
-            
-        Raises:
-            ChartGenerationError: If chart generation fails
         """
         with ErrorContext("Chart generation") as ctx:
             ctx.add_detail("output_path", output_path)
@@ -102,38 +87,136 @@ class ChartGenerator:
             # Prepare data for mplfinance
             chart_data = self._prepare_chart_data(df)
             
-            # Create additional plots
-            additional_plots = self._create_additional_plots(chart_data, include_rsi)
+            # Check what indicators we actually have
+            has_rsi = include_rsi and 'rsi14' in df.columns and not df['rsi14'].dropna().empty
+            has_volume = include_volume and 'volume' in df.columns and not df['volume'].dropna().empty
             
-            # Configure chart style
-            style_config = self._get_style_config(include_volume, include_rsi)
+            logger.debug(f"Chart features: has_rsi={has_rsi}, has_volume={has_volume}")
+            
+            # Create additional plots based on available data
+            additional_plots = self._create_additional_plots(df, has_rsi)
+            
+            # Configure chart style based on what we're actually including
+            style_config = self._get_style_config(has_volume, has_rsi)
             
             # Generate chart
             try:
                 # Set figure size
                 fig_size = (width/100, height/100)  # Convert pixels to inches (approx)
                 
-                mpf.plot(
-                    chart_data,
-                    addplot=additional_plots,
-                    title=title,
-                    savefig=dict(
+                # Build the plot arguments
+                plot_args = {
+                    "addplot": additional_plots if additional_plots else None,
+                    "title": title,
+                    "savefig": dict(
                         fname=output_path,
                         dpi=100,
                         bbox_inches='tight',
                         facecolor=self.colors['background']
                     ),
-                    figsize=fig_size,
+                    "figsize": fig_size,
                     **style_config
-                )
+                }
+                
+                # Remove None values
+                plot_args = {k: v for k, v in plot_args.items() if v is not None}
+                
+                mpf.plot(chart_data, **plot_args)
                 
                 logger.info(f"Chart generated successfully: {output_path}")
                 return output_path
                 
             except Exception as e:
                 logger.error(f"Chart generation failed: {e}")
-                raise ChartGenerationError(f"Failed to generate chart: {str(e)}")
-    
+                
+                # Try a simpler fallback chart
+                try:
+                    logger.info("Attempting fallback chart generation...")
+                    simple_config = {
+                        'type': 'candle',
+                        'volume': False,  # Disable volume for fallback
+                        'style': 'yahoo'
+                    }
+                    
+                    mpf.plot(
+                        chart_data,
+                        title=f"{title} (Simplified)",
+                        savefig=dict(fname=output_path, dpi=100, bbox_inches='tight'),
+                        figsize=(12, 8),
+                        **simple_config
+                    )
+                    
+                    logger.info(f"Fallback chart generated: {output_path}")
+                    return output_path
+                    
+                except Exception as fallback_error:
+                    logger.error(f"Fallback chart generation also failed: {fallback_error}")
+                    raise ChartGenerationError(f"Chart generation failed: {str(e)}")
+
+    def _validate_dataframe(self, df: pd.DataFrame):
+        """Enhanced DataFrame validation"""
+        required_columns = ['open', 'high', 'low', 'close']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            raise ChartGenerationError(f"Missing required columns: {missing_columns}")
+        
+        if df.empty:
+            raise ChartGenerationError("DataFrame is empty")
+        
+        # Check for sufficient data
+        if len(df) < 5:
+            raise ChartGenerationError(f"Insufficient data for charting: {len(df)} rows")
+        
+        # Ensure DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'timestamp' in df.columns:
+                df.set_index('timestamp', inplace=True)
+            else:
+                # Create a simple datetime index if none exists
+                df.index = pd.date_range(start='2024-01-01', periods=len(df), freq='H')
+                logger.warning("Created synthetic datetime index for chart")
+        
+        # Validate OHLC data integrity
+        invalid_rows = (df['high'] < df['low']) | (df['open'] < df['low']) | (df['open'] > df['high']) | (df['close'] < df['low']) | (df['close'] > df['high'])
+        if invalid_rows.any():
+            logger.warning(f"Found {invalid_rows.sum()} rows with invalid OHLC data, cleaning...")
+            df = df[~invalid_rows]
+            
+        if len(df) < 5:
+            raise ChartGenerationError("Insufficient valid data after cleaning")
+        """Enhanced DataFrame validation"""
+        required_columns = ['open', 'high', 'low', 'close']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            raise ChartGenerationError(f"Missing required columns: {missing_columns}")
+        
+        if df.empty:
+            raise ChartGenerationError("DataFrame is empty")
+        
+        # Check for sufficient data
+        if len(df) < 5:
+            raise ChartGenerationError(f"Insufficient data for charting: {len(df)} rows")
+        
+        # Ensure DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'timestamp' in df.columns:
+                df.set_index('timestamp', inplace=True)
+            else:
+                # Create a simple datetime index if none exists
+                df.index = pd.date_range(start='2024-01-01', periods=len(df), freq='H')
+                logger.warning("Created synthetic datetime index for chart")
+        
+        # Validate OHLC data integrity
+        invalid_rows = (df['high'] < df['low']) | (df['open'] < df['low']) | (df['open'] > df['high']) | (df['close'] < df['low']) | (df['close'] > df['high'])
+        if invalid_rows.any():
+            logger.warning(f"Found {invalid_rows.sum()} rows with invalid OHLC data, cleaning...")
+            df = df[~invalid_rows]
+            
+        if len(df) < 5:
+            raise ChartGenerationError("Insufficient valid data after cleaning")
+
     def generate_vsa_chart(
         self,
         df: pd.DataFrame,
@@ -207,13 +290,11 @@ class ChartGenerator:
 ) -> List:
         """Create additional plots for indicators"""
         additional_plots = []
-        panel_assignments = {'main': 0}  # Track which panel number to use
-        current_panel = 1  # Start with panel 1 for additional panels
         
-        # Add EMAs to main panel
+        # Add EMAs to main panel (panel 0)
         if 'ema50' in df.columns:
             ema50_data = df['ema50'].dropna()
-            if not ema50_data.empty:
+            if not ema50_data.empty and len(ema50_data) > 0:
                 additional_plots.append(
                     mpf.make_addplot(
                         ema50_data,
@@ -225,7 +306,7 @@ class ChartGenerator:
         
         if 'ema200' in df.columns:
             ema200_data = df['ema200'].dropna()
-            if not ema200_data.empty:
+            if not ema200_data.empty and len(ema200_data) > 0:
                 additional_plots.append(
                     mpf.make_addplot(
                         ema200_data,
@@ -235,34 +316,44 @@ class ChartGenerator:
                     )
                 )
         
-        # Only add RSI if requested AND data exists
+        # Only add RSI if requested AND data exists AND we have volume enabled
+        # RSI goes to panel 2 if volume is enabled (panel 1), otherwise panel 1
         if include_rsi and 'rsi14' in df.columns:
             rsi_data = df['rsi14'].dropna()
-            if not rsi_data.empty and len(rsi_data) > 0:
-                # Volume takes panel 1 if included, so RSI goes to panel 2
-                # If no volume, RSI goes to panel 1
-                rsi_panel = 2 if self.default_style.get('volume', True) else 1
+            if not rsi_data.empty and len(rsi_data) > 10:  # Need at least 10 points for RSI
+                # Determine RSI panel number based on volume setting
+                volume_enabled = self.default_style.get('volume', True)
+                rsi_panel = 2 if volume_enabled else 1
                 
-                additional_plots.append(
-                    mpf.make_addplot(
-                        rsi_data,
-                        color=self.colors['rsi'],
-                        panel=rsi_panel,
-                        ylabel='RSI',
-                        ylim=(0, 100),
-                        secondary_y=False
+                try:
+                    additional_plots.append(
+                        mpf.make_addplot(
+                            rsi_data,
+                            color=self.colors['rsi'],
+                            panel=rsi_panel,
+                            ylabel='RSI',
+                            ylim=(0, 100),
+                            secondary_y=False
+                        )
                     )
-                )
-                
-                # Add RSI reference lines
-                rsi_70 = pd.Series([70] * len(rsi_data), index=rsi_data.index)
-                rsi_30 = pd.Series([30] * len(rsi_data), index=rsi_data.index)
-                
-                additional_plots.extend([
-                    mpf.make_addplot(rsi_70, color='red', linestyle='--', width=0.5, panel=rsi_panel),
-                    mpf.make_addplot(rsi_30, color='green', linestyle='--', width=0.5, panel=rsi_panel)
-                ])
-        
+                    
+                    # Add RSI reference lines only if we have data
+                    if len(rsi_data) > 0:
+                        rsi_70 = pd.Series([70] * len(rsi_data), index=rsi_data.index)
+                        rsi_30 = pd.Series([30] * len(rsi_data), index=rsi_data.index)
+                        
+                        additional_plots.extend([
+                            mpf.make_addplot(rsi_70, color='red', linestyle='--', width=0.5, panel=rsi_panel),
+                            mpf.make_addplot(rsi_30, color='green', linestyle='--', width=0.5, panel=rsi_panel)
+                        ])
+                        
+                    logger.debug(f"Added RSI to panel {rsi_panel} with {len(rsi_data)} data points")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to add RSI plot: {e}")
+                    # Continue without RSI rather than fail
+    
+        logger.debug(f"Created {len(additional_plots)} additional plots")
         return additional_plots
     
     def _get_style_config(self, include_volume: bool, include_rsi: bool) -> Dict[str, Any]:
@@ -280,15 +371,22 @@ class ChartGenerator:
         if panel_count == 1:
             config['panel_ratios'] = (1,)
         elif panel_count == 2:
-            if include_volume:
+            if include_volume and not include_rsi:
                 config['panel_ratios'] = (4, 1)  # Main, Volume
-            else:
+            elif include_rsi and not include_volume:
                 config['panel_ratios'] = (4, 1)  # Main, RSI
+            else:
+                config['panel_ratios'] = (4, 1)  # Fallback
         elif panel_count == 3:
             config['panel_ratios'] = (6, 2, 2)  # Main, Volume, RSI
+        else:
+            config['panel_ratios'] = (1,)  # Fallback
         
         config['volume'] = include_volume
-    
+        
+        # Debug logging
+        logger.debug(f"Chart config: panels={panel_count}, volume={include_volume}, rsi={include_rsi}, ratios={config['panel_ratios']}")
+        
         return config
     
     def _add_vsa_indicators(self, df: pd.DataFrame) -> pd.DataFrame:

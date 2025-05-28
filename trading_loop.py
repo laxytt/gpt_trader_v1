@@ -300,6 +300,9 @@ class TradingSystemBootstrap:
         def signal_handler(sig, frame):
             logger.info(f"🛑 Received signal {sig}, initiating graceful shutdown...")
             self._shutdown_requested = True
+            if self.orchestrator:
+                self.orchestrator._shutdown_requested = True
+                asyncio.create_task(self.orchestrator.stop())
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
