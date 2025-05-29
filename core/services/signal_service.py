@@ -21,6 +21,7 @@ from core.infrastructure.gpt.signal_generator import GPTSignalGenerator
 from core.infrastructure.database.repositories import SignalRepository
 from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
+from core.services.offline_validator import OfflineSignalValidator
 from core.utils.chart_utils import ChartGenerator, create_market_data_chart
 from core.utils.error_handling import with_error_recovery
 from core.utils.validation import SignalValidator
@@ -113,7 +114,7 @@ class MarketContextAnalyzer:
 class SignalService:
     """
     Orchestrates trading signal generation by coordinating all required components.
-    """
+    Now includes offline validation before GPT calls.    """
     
     def __init__(
         self,
@@ -124,7 +125,8 @@ class SignalService:
         signal_repository: SignalRepository,
         trading_config: TradingSettings,
         chart_generator: Optional[ChartGenerator] = None,
-        screenshots_dir: str = "screenshots"
+        screenshots_dir: str = "screenshots",
+        enable_offline_validation: bool = True
     ):
         self.data_provider = data_provider
         self.signal_generator = signal_generator
@@ -141,19 +143,20 @@ class SignalService:
         
         # Ensure screenshots directory exists
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize offline validator
+        self.enable_offline_validation = enable_offline_validation
+        if enable_offline_validation:
+            self.offline_validator = OfflineSignalValidator()
+            logger.info("Offline signal validation enabled")
+        else:
+            self.offline_validator = None
+            logger.info("Offline signal validation disabled")
     
     async def generate_signal(self, symbol: str) -> TradingSignal:
         """
         Generate a comprehensive trading signal for the given symbol.
-        
-        Args:
-            symbol: Trading symbol to analyze
-            
-        Returns:
-            TradingSignal object
-            
-        Raises:
-            SignalGenerationError: If signal generation fails
+        Now includes offline validation step before GPT analysis.
         """
         with ErrorContext("Signal generation", symbol=symbol) as ctx:
             logger.info(f"Starting signal generation for {symbol}")
@@ -163,52 +166,75 @@ class SignalService:
                 ctx.add_detail("step", "data_gathering")
                 market_data = await self._gather_market_data(symbol)
                 
-                # Step 2: Check news restrictions
+                # Step 2: Run offline validation (NEW)
+                ctx.add_detail("step", "offline_validation")
+                validation_result = None
+                if self.enable_offline_validation:
+                    validation_result = await self._run_offline_validation(
+                        market_data['h1']
+                    )
+                    
+                    # Check if we should skip based on validation
+                    if not validation_result['should_proceed']:
+                        logger.info(
+                            f"Offline validation suggests skipping {symbol}: "
+                            f"Score={validation_result['validation_summary']['weighted_score']:.2f}"
+                        )
+                        
+                        # Return a WAIT signal with validation context
+                        return self._create_validation_based_wait_signal(
+                            symbol, validation_result
+                        )
+                
+                # Step 3: Check news restrictions (existing)
                 ctx.add_detail("step", "news_check")
                 news_events = await self._check_news_restrictions(symbol)
                 
-                # Step 3: Analyze market context
+                # Step 4: Analyze market context (existing)
                 ctx.add_detail("step", "context_analysis")
                 market_context = self.context_analyzer.analyze_context(
                     symbol, market_data['h1']
                 )
                 
-                # Step 4: Generate charts if available
+                # Step 5: Generate charts if available (existing)
                 ctx.add_detail("step", "chart_generation")
                 chart_paths = await self._generate_charts(symbol, market_data)
                 
-                # Step 5: Get historical context
+                # Step 6: Get historical context (existing)
                 ctx.add_detail("step", "historical_context")
-                historical_cases = await self._get_historical_context(symbol, market_data['h1'])
+                historical_cases = await self._get_historical_context(
+                    symbol, market_data['h1']
+                )
                 
-                # Step 6: Generate signal using GPT
+                # Step 7: Generate signal using GPT with validation context (MODIFIED)
                 ctx.add_detail("step", "gpt_analysis")
-                signal = await self.signal_generator.generate_signal(
+                signal = await self._generate_signal_with_validation_context(
                     h1_data=market_data['h1'],
                     h4_data=market_data['h4'],
                     news_events=news_events,
                     market_context=market_context,
                     chart_paths=chart_paths,
-                    historical_cases=historical_cases
+                    historical_cases=historical_cases,
+                    validation_result=validation_result  # NEW: Pass validation context
                 )
                 
-                # Step 7: Validate signal
+                # Step 8: Validate signal (existing)
                 ctx.add_detail("step", "validation")
                 self.validator.validate_signal(signal)
                 
-                # Step 8: Store signal
+                # Step 9: Store signal with validation metadata (MODIFIED)
                 ctx.add_detail("step", "storage")
-                await self._store_signal(signal)
+                await self._store_signal_with_metadata(signal, validation_result)
                 
-                logger.info(f"Signal generated successfully for {symbol}: "
-                           f"{signal.signal.value} ({signal.risk_class.value})")
+                logger.info(
+                    f"Signal generated successfully for {symbol}: "
+                    f"{signal.signal.value} ({signal.risk_class.value})"
+                )
                 
                 return signal
                 
             except Exception as e:
                 logger.error(f"Signal generation failed for {symbol}: {e}")
-                
-                # Return fallback signal
                 return self._create_fallback_signal(symbol, str(e))
     
     async def _gather_market_data(self, symbol: str) -> Dict[str, MarketData]:
@@ -323,6 +349,149 @@ class SignalService:
             logger.error(f"Failed to store signal: {e}")
             # Don't fail signal generation if storage fails
     
+    async def _run_offline_validation(
+        self, 
+        market_data: MarketData
+    ) -> Dict[str, Any]:
+        """Run offline validation on market data"""
+        try:
+            validation_result = await self.offline_validator.validate_market_data(
+                market_data,
+                min_score_threshold=0.5  # Configurable threshold
+            )
+            
+            # Log validation summary
+            summary = validation_result['validation_summary']
+            logger.info(
+                f"Offline validation for {market_data.symbol}: "
+                f"Score={summary['weighted_score']:.2f}, "
+                f"Passed={summary['validators_passed']}/{summary['total_validators']}"
+            )
+            
+            # Log any critical issues
+            if summary['critical_issues']:
+                logger.warning(
+                    f"Critical issues for {market_data.symbol}: "
+                    f"{[issue['message'] for issue in summary['critical_issues']]}"
+                )
+            
+            return validation_result
+            
+        except Exception as e:
+            logger.error(f"Offline validation failed: {e}")
+            # Return a neutral result on error (don't block trading)
+            return {
+                'should_proceed': True,
+                'validation_summary': {'weighted_score': 0.5},
+                'gpt_context': {'pre_validation_performed': False, 'error': str(e)}
+            }
+
+    def _create_validation_based_wait_signal(
+        self, 
+        symbol: str, 
+        validation_result: Dict[str, Any]
+    ) -> TradingSignal:
+        """Create a WAIT signal based on validation results"""
+        summary = validation_result['validation_summary']
+        top_issues = summary.get('all_issues', [])[:2]  # Top 2 issues
+        
+        reason_parts = [
+            f"Market quality below threshold (score: {summary['weighted_score']:.2f})"
+        ]
+        
+        for issue in top_issues:
+            reason_parts.append(f"- {issue['message']}")
+        
+        reason = ". ".join(reason_parts)
+        
+        return TradingSignal(
+            symbol=symbol,
+            signal=SignalType.WAIT,
+            reason=reason,
+            risk_class=RiskClass.C,
+            timestamp=datetime.now(timezone.utc),
+            market_context={'validation_score': summary['weighted_score']}
+        )
+    
+    async def _generate_signal_with_validation_context(
+        self,
+        h1_data: MarketData,
+        h4_data: MarketData,
+        news_events: List[NewsEvent],
+        market_context: MarketContext,
+        chart_paths: Optional[Dict[str, str]],
+        historical_cases: Optional[List[Dict[str, Any]]],
+        validation_result: Optional[Dict[str, Any]]
+    ) -> TradingSignal:
+        """Generate signal with offline validation context"""
+        
+        # If no validation result, use standard generation
+        if not validation_result:
+            return await self.signal_generator.generate_signal(
+                h1_data=h1_data,
+                h4_data=h4_data,
+                news_events=news_events,
+                market_context=market_context,
+                chart_paths=chart_paths,
+                historical_cases=historical_cases
+            )
+        
+        # Enhance market context with validation data
+        enhanced_context = market_context.to_dict()
+        enhanced_context['offline_validation'] = validation_result['gpt_context']
+        
+        # Create enhanced market context object
+        enhanced_market_context = MarketContext(
+            session=market_context.session,
+            volatility=market_context.volatility,
+            win_streak_type=market_context.win_streak_type,
+            win_streak_length=market_context.win_streak_length,
+            win_rate=market_context.win_rate,
+            sample_size=market_context.sample_size,
+            timestamp=market_context.timestamp
+        )
+        
+        # Add validation data to the market context dictionary representation
+        enhanced_market_context_dict = enhanced_market_context.to_dict()
+        enhanced_market_context_dict.update({'offline_validation': validation_result['gpt_context']})
+        
+        # We need to modify the signal generator to accept this enhanced context
+        # For now, we'll pass it through the historical_cases parameter
+        enhanced_historical = historical_cases or []
+        enhanced_historical.append({
+            'type': 'current_validation',
+            'validation_data': validation_result['gpt_context']
+        })
+        
+        return await self.signal_generator.generate_signal(
+            h1_data=h1_data,
+            h4_data=h4_data,
+            news_events=news_events,
+            market_context=enhanced_market_context,
+            chart_paths=chart_paths,
+            historical_cases=enhanced_historical
+        )
+    
+    async def _store_signal_with_metadata(
+        self, 
+        signal: TradingSignal,
+        validation_result: Optional[Dict[str, Any]]
+    ):
+        """Store signal with validation metadata"""
+        try:
+            # Add validation score to signal metadata if available
+            if validation_result and hasattr(signal, 'metadata'):
+                signal.metadata = signal.metadata or {}
+                signal.metadata['validation_score'] = validation_result['validation_summary']['weighted_score']
+                signal.metadata['validation_passed'] = validation_result['should_proceed']
+            
+            self.signal_repository.save_signal(signal)
+            logger.debug(f"Signal stored for {signal.symbol}")
+            
+        except Exception as e:
+            logger.error(f"Failed to store signal: {e}")
+            # Don't fail signal generation if storage fails
+
     def _create_fallback_signal(self, symbol: str, reason: str) -> TradingSignal:
         """Create a fallback WAIT signal when generation fails"""
         return TradingSignal(

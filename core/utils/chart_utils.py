@@ -10,6 +10,10 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+# Set matplotlib to use non-interactive backend BEFORE importing pyplot
+import matplotlib
+matplotlib.use('Agg')  # Use Anti-Grain Geometry backend (non-interactive)
+
 try:
     import mplfinance as mpf
     import matplotlib.pyplot as plt
@@ -43,6 +47,9 @@ class ChartGenerator:
         if not PLOTTING_AVAILABLE:
             raise ChartGenerationError("Required plotting libraries not installed")
         
+        # Ensure we're using non-interactive backend
+        matplotlib.use('Agg')
+        
         # Chart styling configuration
         self.default_style = {
             'type': 'candle',
@@ -65,14 +72,14 @@ class ChartGenerator:
         }
     
     def generate_chart_with_indicators(
-    self,
-    df: pd.DataFrame,
-    output_path: str,
-    title: str = "Market Analysis",
-    include_volume: bool = True,
-    include_rsi: bool = True,
-    width: int = 1200,
-    height: int = 800
+        self,
+        df: pd.DataFrame,
+        output_path: str,
+        title: str = "Market Analysis",
+        include_volume: bool = True,
+        include_rsi: bool = True,
+        width: int = 1200,
+        height: int = 800
     ) -> str:
         """
         Generate candlestick chart with technical indicators.
@@ -121,7 +128,11 @@ class ChartGenerator:
                 # Remove None values
                 plot_args = {k: v for k, v in plot_args.items() if v is not None}
                 
-                mpf.plot(chart_data, **plot_args)
+                # Create figure and plot
+                fig, axes = mpf.plot(chart_data, returnfig=True, **plot_args)
+                
+                # Force close the figure to prevent tkinter issues
+                plt.close(fig)
                 
                 logger.info(f"Chart generated successfully: {output_path}")
                 return output_path
@@ -138,13 +149,17 @@ class ChartGenerator:
                         'style': 'yahoo'
                     }
                     
-                    mpf.plot(
+                    fig, axes = mpf.plot(
                         chart_data,
                         title=f"{title} (Simplified)",
                         savefig=dict(fname=output_path, dpi=100, bbox_inches='tight'),
                         figsize=(12, 8),
+                        returnfig=True,
                         **simple_config
                     )
+                    
+                    # Force close the figure
+                    plt.close(fig)
                     
                     logger.info(f"Fallback chart generated: {output_path}")
                     return output_path
@@ -152,108 +167,10 @@ class ChartGenerator:
                 except Exception as fallback_error:
                     logger.error(f"Fallback chart generation also failed: {fallback_error}")
                     raise ChartGenerationError(f"Chart generation failed: {str(e)}")
-
-    def _validate_dataframe(self, df: pd.DataFrame):
-        """Enhanced DataFrame validation"""
-        required_columns = ['open', 'high', 'low', 'close']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        
-        if missing_columns:
-            raise ChartGenerationError(f"Missing required columns: {missing_columns}")
-        
-        if df.empty:
-            raise ChartGenerationError("DataFrame is empty")
-        
-        # Check for sufficient data
-        if len(df) < 5:
-            raise ChartGenerationError(f"Insufficient data for charting: {len(df)} rows")
-        
-        # Ensure DatetimeIndex
-        if not isinstance(df.index, pd.DatetimeIndex):
-            if 'timestamp' in df.columns:
-                df.set_index('timestamp', inplace=True)
-            else:
-                # Create a simple datetime index if none exists
-                df.index = pd.date_range(start='2024-01-01', periods=len(df), freq='H')
-                logger.warning("Created synthetic datetime index for chart")
-        
-        # Validate OHLC data integrity
-        invalid_rows = (df['high'] < df['low']) | (df['open'] < df['low']) | (df['open'] > df['high']) | (df['close'] < df['low']) | (df['close'] > df['high'])
-        if invalid_rows.any():
-            logger.warning(f"Found {invalid_rows.sum()} rows with invalid OHLC data, cleaning...")
-            df = df[~invalid_rows]
-            
-        if len(df) < 5:
-            raise ChartGenerationError("Insufficient valid data after cleaning")
-        """Enhanced DataFrame validation"""
-        required_columns = ['open', 'high', 'low', 'close']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        
-        if missing_columns:
-            raise ChartGenerationError(f"Missing required columns: {missing_columns}")
-        
-        if df.empty:
-            raise ChartGenerationError("DataFrame is empty")
-        
-        # Check for sufficient data
-        if len(df) < 5:
-            raise ChartGenerationError(f"Insufficient data for charting: {len(df)} rows")
-        
-        # Ensure DatetimeIndex
-        if not isinstance(df.index, pd.DatetimeIndex):
-            if 'timestamp' in df.columns:
-                df.set_index('timestamp', inplace=True)
-            else:
-                # Create a simple datetime index if none exists
-                df.index = pd.date_range(start='2024-01-01', periods=len(df), freq='H')
-                logger.warning("Created synthetic datetime index for chart")
-        
-        # Validate OHLC data integrity
-        invalid_rows = (df['high'] < df['low']) | (df['open'] < df['low']) | (df['open'] > df['high']) | (df['close'] < df['low']) | (df['close'] > df['high'])
-        if invalid_rows.any():
-            logger.warning(f"Found {invalid_rows.sum()} rows with invalid OHLC data, cleaning...")
-            df = df[~invalid_rows]
-            
-        if len(df) < 5:
-            raise ChartGenerationError("Insufficient valid data after cleaning")
-
-    def generate_vsa_chart(
-        self,
-        df: pd.DataFrame,
-        output_path: str,
-        title: str = "VSA Analysis",
-        highlight_patterns: Optional[List[Dict[str, Any]]] = None
-    ) -> str:
-        """
-        Generate chart with VSA (Volume Spread Analysis) annotations.
-        
-        Args:
-            df: DataFrame with OHLCV data
-            output_path: Path to save the chart
-            title: Chart title
-            highlight_patterns: List of VSA patterns to highlight
-            
-        Returns:
-            Path to generated chart file
-        """
-        with ErrorContext("VSA chart generation"):
-            # Add VSA-specific indicators
-            vsa_df = self._add_vsa_indicators(df.copy())
-            
-            # Create base chart
-            chart_path = self.generate_chart_with_indicators(
-                vsa_df, output_path, title
-            )
-            
-            # Add VSA annotations if patterns provided
-            if highlight_patterns:
-                self._add_vsa_annotations(chart_path, highlight_patterns)
-            
-            return chart_path
     
     def _validate_dataframe(self, df: pd.DataFrame):
-        """Validate DataFrame has required columns and proper index"""
-        required_columns = ['open', 'high', 'low', 'close', 'volume']
+        """Enhanced DataFrame validation"""
+        required_columns = ['open', 'high', 'low', 'close']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
@@ -262,12 +179,27 @@ class ChartGenerator:
         if df.empty:
             raise ChartGenerationError("DataFrame is empty")
         
+        # Check for sufficient data
+        if len(df) < 5:
+            raise ChartGenerationError(f"Insufficient data for charting: {len(df)} rows")
+        
         # Ensure DatetimeIndex
         if not isinstance(df.index, pd.DatetimeIndex):
             if 'timestamp' in df.columns:
                 df.set_index('timestamp', inplace=True)
             else:
-                raise ChartGenerationError("DataFrame must have DatetimeIndex or 'timestamp' column")
+                # Create a simple datetime index if none exists
+                df.index = pd.date_range(start='2024-01-01', periods=len(df), freq='H')
+                logger.warning("Created synthetic datetime index for chart")
+        
+        # Validate OHLC data integrity
+        invalid_rows = (df['high'] < df['low']) | (df['open'] < df['low']) | (df['open'] > df['high']) | (df['close'] < df['low']) | (df['close'] > df['high'])
+        if invalid_rows.any():
+            logger.warning(f"Found {invalid_rows.sum()} rows with invalid OHLC data, cleaning...")
+            df = df[~invalid_rows]
+            
+        if len(df) < 5:
+            raise ChartGenerationError("Insufficient valid data after cleaning")
     
     def _prepare_chart_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Prepare DataFrame for mplfinance"""
@@ -284,10 +216,10 @@ class ChartGenerator:
         return chart_data
     
     def _create_additional_plots(
-    self, 
-    df: pd.DataFrame, 
-    include_rsi: bool = True
-) -> List:
+        self, 
+        df: pd.DataFrame, 
+        include_rsi: bool = True
+    ) -> List:
         """Create additional plots for indicators"""
         additional_plots = []
         
@@ -316,8 +248,7 @@ class ChartGenerator:
                     )
                 )
         
-        # Only add RSI if requested AND data exists AND we have volume enabled
-        # RSI goes to panel 2 if volume is enabled (panel 1), otherwise panel 1
+        # Only add RSI if requested AND data exists
         if include_rsi and 'rsi14' in df.columns:
             rsi_data = df['rsi14'].dropna()
             if not rsi_data.empty and len(rsi_data) > 10:  # Need at least 10 points for RSI
@@ -352,7 +283,7 @@ class ChartGenerator:
                 except Exception as e:
                     logger.warning(f"Failed to add RSI plot: {e}")
                     # Continue without RSI rather than fail
-    
+        
         logger.debug(f"Created {len(additional_plots)} additional plots")
         return additional_plots
     
@@ -388,6 +319,31 @@ class ChartGenerator:
         logger.debug(f"Chart config: panels={panel_count}, volume={include_volume}, rsi={include_rsi}, ratios={config['panel_ratios']}")
         
         return config
+    
+    def generate_vsa_chart(
+        self,
+        df: pd.DataFrame,
+        output_path: str,
+        title: str = "VSA Analysis",
+        highlight_patterns: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """
+        Generate chart with VSA (Volume Spread Analysis) annotations.
+        """
+        with ErrorContext("VSA chart generation"):
+            # Add VSA-specific indicators
+            vsa_df = self._add_vsa_indicators(df.copy())
+            
+            # Create base chart
+            chart_path = self.generate_chart_with_indicators(
+                vsa_df, output_path, title
+            )
+            
+            # Add VSA annotations if patterns provided
+            if highlight_patterns:
+                self._add_vsa_annotations(chart_path, highlight_patterns)
+            
+            return chart_path
     
     def _add_vsa_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add VSA-specific indicators to DataFrame"""
@@ -437,14 +393,6 @@ class ChartGenerator:
     ) -> str:
         """
         Create comparison chart for multiple symbols.
-        
-        Args:
-            data_dict: Dictionary mapping symbol names to DataFrames
-            output_path: Path to save the chart
-            title: Chart title
-            
-        Returns:
-            Path to generated chart file
         """
         if not PLOTTING_AVAILABLE:
             raise ChartGenerationError("Plotting libraries not available")
@@ -474,7 +422,7 @@ class ChartGenerator:
             plt.suptitle(title, fontsize=16)
             plt.tight_layout()
             plt.savefig(output_path, dpi=100, bbox_inches='tight')
-            plt.close()
+            plt.close(fig)  # Explicitly close figure
             
             logger.info(f"Comparison chart generated: {output_path}")
             return output_path
@@ -487,12 +435,6 @@ class ChartGenerator:
 def encode_image_as_b64(image_path: str) -> Optional[Dict[str, Any]]:
     """
     Encode image as base64 for GPT vision analysis.
-    
-    Args:
-        image_path: Path to image file
-        
-    Returns:
-        Dictionary with base64 encoded image or None if failed
     """
     try:
         path = Path(image_path)
@@ -534,14 +476,6 @@ def create_market_data_chart(
 ) -> Optional[str]:
     """
     Create chart from MarketData object.
-    
-    Args:
-        market_data: MarketData object to chart
-        output_path: Path to save chart
-        title: Optional chart title
-        
-    Returns:
-        Path to generated chart or None if failed
     """
     if not market_data.candles:
         logger.warning("No candles in market data")
