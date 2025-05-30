@@ -337,6 +337,33 @@ class BacktestSignalGenerator:
             reason=f"{reason}, validation score: {score:.2f}"
         )
     
+    def _create_sell_signal_improved(self, market_data: MarketData, score: float, reason: str) -> TradingSignal:
+        """Create improved sell signal with better SL/TP"""
+        latest = market_data.latest_candle
+        candles = market_data.candles[-20:]
+        
+        # Find recent swing high for stop loss
+        recent_high = max(c.high for c in candles[-10:])
+        atr = latest.atr14 or 0.0001
+        
+        entry = latest.close
+        stop_loss = max(recent_high + (0.5 * atr), entry + (2 * atr))
+        
+        # Dynamic TP based on R:R
+        risk = stop_loss - entry
+        take_profit = entry - (risk * 3)  # Target 3:1 RR
+        
+        return TradingSignal(
+            symbol=market_data.symbol,
+            signal=SignalType.SELL,
+            entry=entry,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_reward=3.0,
+            risk_class=RiskClass.A if score > 0.85 else RiskClass.B,
+            reason=f"{reason}, validation score: {score:.2f}"
+        )
+
     def _create_buy_signal(self, market_data: MarketData, score: float) -> TradingSignal:
         """Create buy signal"""
         latest = market_data.latest_candle
