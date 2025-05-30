@@ -23,7 +23,7 @@ from core.utils.chart_utils import ChartGenerator
 async def main():
     """Run backtest with current configuration"""
     
-    # Load settings
+        # Load settings
     settings = get_settings()
     
     # Initialize MT5 client
@@ -32,12 +32,39 @@ async def main():
         print("Failed to initialize MT5")
         return
     
+    # Add MT5 connection check
+    account_info = mt5_client.get_account_info()
+    if account_info:
+        print(f"MT5 Connected - Account: {account_info.get('login', 'Unknown')}")
+    else:
+        print("MT5 connected but cannot get account info")
+    
+    # Check if symbol exists
+    symbol_info = mt5_client.get_symbol_info("EURUSD")
+    if symbol_info:
+        print(f"Symbol EURUSD found: {symbol_info.get('description', 'No description')}")
+    else:
+        print("Symbol EURUSD not found in MT5")
+    
     try:
         # Create data provider
         data_provider = MT5DataProvider(mt5_client)
         
+        # Test data retrieval directly
+        from core.domain.enums import TimeFrame
+        print("Testing direct data retrieval...")
+        test_data = await data_provider.get_market_data(
+            symbol="EURUSD",
+            timeframe=TimeFrame.H1,
+            bars=1000  # Get more bars to ensure we have data
+        )
+        print(f"Retrieved {len(test_data.candles)} candles")
+        if test_data.candles:
+            print(f"Date range: {test_data.candles[0].timestamp} to {test_data.candles[-1].timestamp}")
+        
+        
         # Configure backtest - OFFLINE 2024 2025
-        config = BacktestConfig(
+        config_temp = BacktestConfig(
             start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
             end_date=datetime(2024, 12, 31, tzinfo=timezone.utc),
             symbols=settings.trading.symbols[:2],  # Use first 2 symbols from config
@@ -48,13 +75,15 @@ async def main():
         )
         
         # Test one month with real GPT
-        config_gpt = BacktestConfig(
-        start_date=datetime(2024, 10, 1, tzinfo=timezone.utc),
-        end_date=datetime(2024, 10, 31, tzinfo=timezone.utc),
+        config = BacktestConfig(
+        start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        end_date=datetime(2024, 1, 7, tzinfo=timezone.utc),
         symbols=["EURUSD"],
-        mode=BacktestMode.FULL,  # Real GPT signals
-        risk_per_trade=0.01
-)
+        mode=BacktestMode.FULL,
+        initial_balance=10000,
+        risk_per_trade=0.015
+        )
+
         # Create backtest engine
         engine = BacktestEngine(
             data_provider=data_provider,

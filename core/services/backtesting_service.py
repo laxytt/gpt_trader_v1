@@ -133,26 +133,49 @@ class BacktestDataProvider:
             return self._cache[cache_key]
         
         # Convert string timeframe to TimeFrame enum
-        timeframe_enum = TimeFrame[timeframe]  # This converts "H1" to TimeFrame.H1
+        timeframe_enum = TimeFrame[timeframe]
         
-        # In real implementation, this would fetch from MT5 or database
-        # For now, we'll use the existing data provider
-        bars_needed = int((end_date - start_date).total_seconds() / 3600) + 100
+        # Calculate bars needed with extra buffer
+        hours_needed = int((end_date - start_date).total_seconds() / 3600)
+        bars_needed = hours_needed + 200  # Add 200 bars buffer for indicators
         
-        market_data = await self.data_provider.get_market_data(
-            symbol=symbol,
-            timeframe=timeframe_enum,  # Pass the enum instead of string
-            bars=bars_needed
-        )
+        # We need to request data from current time, not from the specific date
+        # MT5 copy_rates_from_pos gets data counting backwards from current time
+        print(f"Requesting {bars_needed} bars for {symbol}")
         
-        # Convert to DataFrame
-        df = self._market_data_to_dataframe(market_data)
-        
-        # Filter by date range
-        df = df[(df.index >= start_date) & (df.index <= end_date)]
-        
-        self._cache[cache_key] = df
-        return df
+        try:
+            market_data = await self.data_provider.get_market_data(
+                symbol=symbol,
+                timeframe=timeframe_enum,
+                bars=bars_needed + 1000  # Request extra to ensure we cover the date range
+            )
+            
+            if not market_data.candles:
+                print(f"No candles received for {symbol}")
+                return pd.DataFrame()
+            
+            # Convert to DataFrame
+            df = self._market_data_to_dataframe(market_data)
+            
+            print(f"Received data from {df.index.min()} to {df.index.max()}")
+            
+            # Filter by date range
+            df_filtered = df[(df.index >= start_date) & (df.index <= end_date)]
+            
+            if df_filtered.empty:
+                print(f"No data in requested range {start_date} to {end_date}")
+                print(f"Available data range: {df.index.min()} to {df.index.max()}")
+            else:
+                print(f"Filtered to {len(df_filtered)} bars for backtesting")
+            
+            self._cache[cache_key] = df_filtered
+            return df_filtered
+            
+        except Exception as e:
+            print(f"Error getting historical data: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame()
     
     def _market_data_to_dataframe(self, market_data: MarketData) -> pd.DataFrame:
         """Convert MarketData to DataFrame"""
@@ -499,27 +522,39 @@ class BacktestExecutor:
     
     def update_trades(self, current_bars: Dict[str, pd.Series], current_time: datetime):
         """Update all open trades with current prices"""
-        for symbol, trade in list(self.open_trades.items()):
+        # Create a copy of the dictionary keys to avoid modification during iteration
+        symbols_to_check = list(self.open_trades.keys())
+        
+        for symbol in symbols_to_check:
             if symbol not in current_bars:
                 continue
             
+            # Check if trade still exists (might have been closed already)
+            if symbol not in self.open_trades:
+                continue
+                
+            trade = self.open_trades[symbol]
             current_bar = current_bars[symbol]
-            # Check if trade has exceeded max duration Maximum 20 hours
-            if trade.bars_held > 20:  
+            
+            # Check if trade has exceeded max duration
+            if trade.bars_held > 20:  # Maximum 20 hours
                 self._close_trade(
                     trade, 
                     current_bar['close'], 
                     current_time, 
                     "Max Duration"
                 )
+                continue  # Skip further checks for this trade
             
             # Check stop loss
             if self._check_stop_loss(trade, current_bar):
                 self._close_trade(trade, trade.signal.stop_loss, current_time, "Stop Loss")
+                continue  # Skip further checks for this trade
             
             # Check take profit
             elif self._check_take_profit(trade, current_bar):
                 self._close_trade(trade, trade.signal.take_profit, current_time, "Take Profit")
+                continue  # Skip further checks for this trade
             
             else:
                 # Update trade metrics
@@ -603,12 +638,17 @@ class BacktestExecutor:
         # Update balance
         self.balance += trade.pnl
         
-        # Move to closed trades
-        del self.open_trades[trade.signal.symbol]
+        # Move to closed trades - Check if trade exists before deleting
+        symbol = trade.signal.symbol
+        if symbol in self.open_trades:
+            del self.open_trades[symbol]
+        else:
+            logger.warning(f"Trade for {symbol} not found in open_trades when closing")
+        
         self.closed_trades.append(trade)
         
         logger.debug(
-            f"Closed {trade.signal.signal.value} trade for {trade.signal.symbol} "
+            f"Closed {trade.signal.signal.value} trade for {symbol} "
             f"at {exit_price} ({exit_reason}), P&L: {trade.pnl:.2f}"
         )
     
