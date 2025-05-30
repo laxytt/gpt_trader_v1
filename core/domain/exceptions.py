@@ -197,6 +197,10 @@ class ServiceError(TradingSystemError):
     """Base exception for service layer errors"""
     pass
 
+class BacktestingError(ServiceError):
+    """Raised when backtesting operations fail"""
+    pass
+
 
 class ServiceNotAvailableError(ServiceError):
     """Raised when a required service is not available"""
@@ -363,7 +367,7 @@ __all__ = [
     'NewsError', 'NewsRestrictionError', 'NewsDataError', 'MarketDataError', 'ChartGenerationError',
     
     # Service exceptions
-    'ServiceError', 'ServiceNotAvailableError', 'TimeoutError', 'NetworkError',
+    'ServiceError', 'ServiceNotAvailableError', 'TimeoutError', 'NetworkError', 'BacktestingError',
     
     # Notification exceptions
     'NotificationError', 'TelegramError',
