@@ -44,7 +44,7 @@ class TradingSettings(BaseSettings):
     start_hour: int = Field(7, ge=0, le=23, description="Trading start hour (UTC)")
     end_hour: int = Field(23, ge=0, le=23, description="Trading end hour (UTC)")
     risk_per_trade_percent: float = Field(1.5, gt=0, le=10, description="Risk per trade as percentage")
-    max_open_trades: int = Field(5, gt=0, description="Maximum concurrent open trades")
+    max_open_trades: int = Field(3, gt=0, description="Maximum concurrent open trades")
     bars_for_analysis: int = Field(80, gt=0, description="Number of bars for chart analysis")
     bars_for_json: int = Field(20, gt=0, description="Number of bars for JSON data")
     

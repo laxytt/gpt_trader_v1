@@ -47,8 +47,8 @@ class BacktestConfig:
     initial_balance: float = 10000.0
     risk_per_trade: float = 0.015  # 1.5%
     max_open_trades: int = 5
-    commission_per_lot: float = 7.0
-    slippage_points: int = 2
+    commission_per_lot: float = 5.0
+    slippage_points: int = 1
     mode: BacktestMode = BacktestMode.OFFLINE_ONLY
     use_spread_filter: bool = True
     use_news_filter: bool = True
@@ -219,10 +219,10 @@ class BacktestSignalGenerator:
         market_data: MarketData,
         validation_result: Dict
     ) -> TradingSignal:
-        """Create signal from validation results"""
+        """Create signal from validation results with improved logic"""
         score = validation_result['validation_summary']['weighted_score']
         
-        if score < 0.6:
+        if score < 0.65:  # Raised threshold
             return TradingSignal(
                 symbol=market_data.symbol,
                 signal=SignalType.WAIT,
@@ -230,27 +230,112 @@ class BacktestSignalGenerator:
                 risk_class=RiskClass.C
             )
         
-        # Simple momentum + validation logic
-        latest = market_data.latest_candle
-        prev = market_data.candles[-2] if len(market_data.candles) > 1 else None
-        
-        if not latest or not prev:
+        # Get recent candles for VSA analysis
+        candles = market_data.candles[-20:]
+        if len(candles) < 20:
             return self._create_wait_signal(market_data.symbol, "Insufficient data")
         
-        # Check for momentum breakout
-        if latest.close > max(c.high for c in market_data.candles[-10:-1]):
-            # Bullish breakout
-            if latest.ema50 and latest.ema200 and latest.ema50 > latest.ema200:
-                if score > 0.7:
-                    return self._create_buy_signal(market_data, score)
+        latest = candles[-1]
+        prev = candles[-2]
         
-        elif latest.close < min(c.low for c in market_data.candles[-10:-1]):
-            # Bearish breakout
-            if latest.ema50 and latest.ema200 and latest.ema50 < latest.ema200:
-                if score > 0.7:
-                    return self._create_sell_signal(market_data, score)
+        # Calculate volume metrics
+        avg_volume = sum(c.volume for c in candles[:-1]) / len(candles[:-1])
+        volume_ratio = latest.volume / avg_volume if avg_volume > 0 else 1
         
-        return self._create_wait_signal(market_data.symbol, "No clear setup")
+        # VSA Pattern Detection
+        buy_signal = False
+        sell_signal = False
+        
+        # 1. Check for Stopping Volume (bullish)
+        if (prev.close < prev.open and  # Down bar
+            prev.volume > avg_volume * 1.5 and  # High volume
+            latest.close > latest.open and  # Up bar
+            latest.close > prev.close):  # Reversal
+            buy_signal = True
+            reason = "Stopping Volume pattern"
+        
+        # 2. Check for No Supply (bullish)
+        elif (latest.close < latest.open and  # Down bar
+            latest.volume < avg_volume * 0.5 and  # Low volume
+            latest.close > latest.low):  # Close off lows
+            # Need confirmation
+            if candles[-3].close < candles[-3].open:  # Previous trend was down
+                buy_signal = True
+                reason = "No Supply pattern"
+        
+        # 3. Check for Upthrust (bearish)
+        if (latest.high > max(c.high for c in candles[-10:-1]) and  # New high
+            latest.close < latest.open and  # But closed down
+            latest.close < (latest.high + latest.low) / 2 and  # Closed in lower half
+            volume_ratio > 1.3):  # With volume
+            sell_signal = True
+            reason = "Upthrust pattern"
+        
+        # 4. Check for No Demand (bearish)
+        elif (latest.close > latest.open and  # Up bar
+            latest.volume < avg_volume * 0.5 and  # Low volume
+            latest.close < latest.high):  # Close off highs
+            if candles[-3].close > candles[-3].open:  # Previous trend was up
+                sell_signal = True
+                reason = "No Demand pattern"
+        
+        # Additional filters
+        if buy_signal:
+            # Check trend alignment
+            if latest.ema50 and latest.ema200:
+                if latest.ema50 < latest.ema200:  # Against major trend
+                    if score < 0.8:  # Only take if very high score
+                        buy_signal = False
+            
+            # Check RSI
+            if latest.rsi14 and latest.rsi14 > 70:
+                buy_signal = False  # Overbought
+        
+        if sell_signal:
+            # Check trend alignment
+            if latest.ema50 and latest.ema200:
+                if latest.ema50 > latest.ema200:  # Against major trend
+                    if score < 0.8:
+                        sell_signal = False
+            
+            # Check RSI
+            if latest.rsi14 and latest.rsi14 < 30:
+                sell_signal = False  # Oversold
+        
+        # Generate signal
+        if buy_signal and score > 0.7:
+            return self._create_buy_signal_improved(market_data, score, reason)
+        elif sell_signal and score > 0.7:
+            return self._create_sell_signal_improved(market_data, score, reason)
+        
+        return self._create_wait_signal(market_data.symbol, "No clear VSA pattern")
+
+    def _create_buy_signal_improved(self, market_data: MarketData, score: float, reason: str) -> TradingSignal:
+        """Create improved buy signal with better SL/TP"""
+        latest = market_data.latest_candle
+        candles = market_data.candles[-20:]
+        
+        # Find recent swing low for stop loss
+        recent_low = min(c.low for c in candles[-10:])
+        atr = latest.atr14 or 0.0001
+        
+        entry = latest.close
+        stop_loss = min(recent_low - (0.5 * atr), entry - (2 * atr))
+        
+        # Dynamic TP based on R:R
+        risk = entry - stop_loss
+        take_profit = entry + (risk * 3)  # Target 3:1 RR
+        
+        return TradingSignal(
+            symbol=market_data.symbol,
+            signal=SignalType.BUY,
+            entry=entry,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_reward=3.0,
+            risk_class=RiskClass.A if score > 0.85 else RiskClass.B,
+            reason=f"{reason}, validation score: {score:.2f}"
+        )
     
     def _create_buy_signal(self, market_data: MarketData, score: float) -> TradingSignal:
         """Create buy signal"""
@@ -392,6 +477,14 @@ class BacktestExecutor:
                 continue
             
             current_bar = current_bars[symbol]
+            # Check if trade has exceeded max duration Maximum 20 hours
+            if trade.bars_held > 20:  
+                self._close_trade(
+                    trade, 
+                    current_bar['close'], 
+                    current_time, 
+                    "Max Duration"
+                )
             
             # Check stop loss
             if self._check_stop_loss(trade, current_bar):

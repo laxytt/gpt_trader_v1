@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 
-from core.domain.models import TradingSignal, Trade, SignalType, TradeStatus
+from core.domain.models import MarketData, TradingSignal, Trade, SignalType, TradeStatus
 from core.domain.exceptions import (
     TradingSystemError, ErrorContext, ServiceError, ConfigurationError
 )
@@ -350,9 +350,24 @@ class TradingOrchestrator:
             except Exception as e:
                 raise ConfigurationError(f"Invalid symbol {symbol}: {e}")
     
-    def _should_trade_now(self) -> bool:
-        """Check if trading should occur now"""
-        return self.scheduler.is_trading_hours()
+    def _should_trade(self, market_data: MarketData) -> bool:
+        """Check if current time is good for trading"""
+        latest = market_data.latest_candle
+        if not latest:
+            return False
+        
+        hour = latest.timestamp.hour
+        
+        # Skip Asian session for EURUSD/GBPUSD
+        if market_data.symbol in ["EURUSD", "GBPUSD"]:
+            if 22 <= hour or hour < 6:  # 10 PM - 6 AM UTC
+                return False
+        
+        # Skip low volume hours
+        if hour in [23, 0, 1, 2, 3, 4, 5]:
+            return False
+        
+        return True
     
     async def _wait_for_trading_hours(self):
         """Wait until trading hours begin"""

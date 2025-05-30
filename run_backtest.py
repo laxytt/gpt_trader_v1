@@ -36,7 +36,7 @@ async def main():
         # Create data provider
         data_provider = MT5DataProvider(mt5_client)
         
-        # Configure backtest
+        # Configure backtest - OFFLINE 2024 2025
         config = BacktestConfig(
             start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
             end_date=datetime(2024, 12, 31, tzinfo=timezone.utc),
@@ -47,6 +47,14 @@ async def main():
             max_open_trades=settings.trading.max_open_trades
         )
         
+        # Test one month with real GPT
+        config_gpt = BacktestConfig(
+        start_date=datetime(2024, 10, 1, tzinfo=timezone.utc),
+        end_date=datetime(2024, 10, 31, tzinfo=timezone.utc),
+        symbols=["EURUSD"],
+        mode=BacktestMode.FULL,  # Real GPT signals
+        risk_per_trade=0.01
+)
         # Create backtest engine
         engine = BacktestEngine(
             data_provider=data_provider,
