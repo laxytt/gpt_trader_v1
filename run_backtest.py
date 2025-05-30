@@ -64,7 +64,7 @@ async def main():
         
         
         # Configure backtest - OFFLINE 2024 2025
-        config_temp = BacktestConfig(
+        config = BacktestConfig(
             start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
             end_date=datetime(2024, 12, 31, tzinfo=timezone.utc),
             symbols=settings.trading.symbols[:2],  # Use first 2 symbols from config
@@ -74,15 +74,15 @@ async def main():
             max_open_trades=settings.trading.max_open_trades
         )
         
-        # Test one month with real GPT
-        config = BacktestConfig(
-        start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        end_date=datetime(2024, 1, 7, tzinfo=timezone.utc),
-        symbols=["EURUSD"],
-        mode=BacktestMode.FULL,
-        initial_balance=10000,
-        risk_per_trade=0.015
-        )
+        # # Test one month with real GPT
+        # config = BacktestConfig(
+        # start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        # end_date=datetime(2024, 1, 7, tzinfo=timezone.utc),
+        # symbols=["EURUSD"],
+        # mode=BacktestMode.FULL,
+        # initial_balance=10000,
+        # risk_per_trade=0.015
+        # )
 
         # Create backtest engine
         engine = BacktestEngine(

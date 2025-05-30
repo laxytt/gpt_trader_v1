@@ -246,6 +246,86 @@ class AddNewsEventsMigration(Migration):
         conn.commit()
         logger.info("News events table created")
 
+class AddBacktestResultsMigration(Migration):
+    """Add backtest results storage for ML"""
+    
+    def __init__(self):
+        super().__init__(5, "Add backtest results tables")
+    
+    def up(self, conn: sqlite3.Connection):
+        """Create backtest results tables"""
+        
+        # Main backtest runs table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_runs (
+                id TEXT PRIMARY KEY,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                symbols TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                initial_balance REAL NOT NULL,
+                risk_per_trade REAL NOT NULL,
+                final_balance REAL NOT NULL,
+                total_return REAL NOT NULL,
+                win_rate REAL NOT NULL,
+                sharpe_ratio REAL NOT NULL,
+                max_drawdown REAL NOT NULL,
+                profit_factor REAL NOT NULL,
+                total_trades INTEGER NOT NULL,
+                config_json TEXT NOT NULL,
+                statistics_json TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Individual backtest trades table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                backtest_run_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                entry_time TEXT NOT NULL,
+                exit_time TEXT,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                stop_loss REAL NOT NULL,
+                take_profit REAL NOT NULL,
+                lot_size REAL NOT NULL,
+                pnl REAL,
+                pnl_points REAL,
+                result TEXT,
+                exit_reason TEXT,
+                bars_held INTEGER,
+                risk_reward_achieved REAL,
+                signal_reason TEXT,
+                risk_class TEXT,
+                validation_score REAL,
+                FOREIGN KEY (backtest_run_id) REFERENCES backtest_runs(id)
+            )
+        """)
+        
+        # Backtest equity curves table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_equity_curves (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                backtest_run_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                equity REAL NOT NULL,
+                drawdown REAL NOT NULL,
+                FOREIGN KEY (backtest_run_id) REFERENCES backtest_runs(id)
+            )
+        """)
+        
+        # Indexes for performance
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_backtest_runs_symbols ON backtest_runs(symbols)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_backtest_runs_created ON backtest_runs(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_backtest_trades_symbol ON backtest_trades(symbol)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_backtest_trades_result ON backtest_trades(result)")
+        
+        conn.commit()
+        logger.info("Backtest results tables created")
+
 
 class DatabaseMigrator:
     """Manages database migrations"""
@@ -260,7 +340,8 @@ class DatabaseMigrator:
             InitialMigration(),
             AddTradeMetadataMigration(),
             AddPerformanceMetricsMigration(),
-            AddNewsEventsMigration()
+            AddNewsEventsMigration(),
+            AddBacktestResultsMigration()
         ]
     
     def get_current_version(self) -> int:

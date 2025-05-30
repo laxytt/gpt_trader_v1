@@ -25,7 +25,7 @@ from core.services.offline_validator import OfflineSignalValidator
 from core.infrastructure.mt5.data_provider import MT5DataProvider
 from core.utils.chart_utils import ChartGenerator
 from config.settings import TradingSettings
-
+from core.infrastructure.database.backtest_repository import BacktestRepository
 
 logger = logging.getLogger(__name__)
 
@@ -1074,6 +1074,24 @@ class BacktestEngine:
         
         # Also save a summary report
         await self._save_summary_report(results, results_dir / f"report_{symbols_str}_{timestamp}.txt")
+
+        # NEW: Save to database for ML
+        try:            
+            repo = BacktestRepository(self.db_path)  # You'll need to pass db_path
+            run_id = repo.save_backtest_run(results)
+            
+            logger.info(f"Backtest results saved to database with ID: {run_id}")
+            
+            # Also store the run_id in the JSON for reference
+            results_dict['database_run_id'] = run_id
+            
+            # Re-save JSON with database reference
+            with open(filepath, 'w') as f:
+                json.dump(results_dict, f, indent=2)
+                
+        except Exception as e:
+            logger.error(f"Failed to save backtest results to database: {e}")
+            # Don't fail the whole backtest if DB save fails
 
     async def _save_summary_report(self, results: BacktestResults, filepath: Path):
         """Save human-readable summary report"""
