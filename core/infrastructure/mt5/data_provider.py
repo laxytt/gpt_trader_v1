@@ -7,6 +7,8 @@ import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 import pandas as pd
+
+from core.infrastructure.data.unified_data_provider import DataRequest, UnifiedDataProvider
 try:
     import talib
     TALIB_AVAILABLE = True
@@ -30,12 +32,13 @@ logger = logging.getLogger(__name__)
 
 class MT5DataProvider:
     """
-    Provides market data from MT5 with technical indicators and chart generation.
-    """
+    MT5 data provider that delegates to UnifiedDataProvider.
+    Maintains backward compatibility while using unified logic.    """
     
     def __init__(self, mt5_client: MT5Client, chart_generator: Optional[ChartGenerator] = None):
         self.mt5_client = mt5_client
         self.chart_generator = chart_generator
+        self.unified_provider = UnifiedDataProvider(mt5_client)
         
         # Technical analysis parameters
         self.indicator_warmup_bars = 250  # Bars needed for indicator stability
@@ -64,47 +67,19 @@ class MT5DataProvider:
             MT5DataError: If data retrieval fails
             InsufficientDataError: If not enough data available
         """
-        with ErrorContext("Market data retrieval", symbol=symbol) as ctx:
-            ctx.add_detail("timeframe", timeframe.value)
-            ctx.add_detail("bars_requested", bars)
-            
-            # Get MT5 timeframe
-            mt5_timeframe = TIMEFRAME_TO_MT5.get(timeframe)
-            if not mt5_timeframe:
-                raise MT5DataError(f"Unsupported timeframe: {timeframe}")
-            
-            # Fetch extra bars for indicator calculation
-            fetch_bars = max(self.indicator_warmup_bars, bars + 50)
-            
-            # Get raw rates from MT5
-            rates_data = self.mt5_client.copy_rates(
-                symbol=symbol,
-                timeframe=mt5_timeframe,
-                start_pos=0,
-                count=fetch_bars
-            )
-            
-            if not rates_data or len(rates_data) < self.min_required_bars:
-                raise InsufficientDataError(
-                    f"Insufficient data for {symbol} {timeframe}: got {len(rates_data) if rates_data else 0} bars"
-                )
-            
-            # Convert to DataFrame for processing
-            df = self._rates_to_dataframe(rates_data)
-            
-            # Calculate technical indicators if requested
-            if include_indicators:
-                df = self._calculate_indicators(df)
-            
-            # Convert to Candle objects (take only requested number of bars)
-            candles = self._dataframe_to_candles(df.tail(bars))
-            
-            return MarketData(
-                symbol=symbol,
-                timeframe=timeframe.value,
-                candles=candles,
-                timestamp=datetime.now(timezone.utc)
-            )
+
+        # Create request for recent bars
+        request = DataRequest(
+            symbol=symbol,
+            timeframe=timeframe,
+            num_bars=bars
+        )
+        
+         # Use unified provider
+        market_data = await self.unified_provider.get_data(request)
+        
+        # Indicators are already included from unified provider
+        return market_data
     
     def _rates_to_dataframe(self, rates_data: List[Dict[str, Any]]) -> pd.DataFrame:
         """Convert MT5 rates data to pandas DataFrame"""

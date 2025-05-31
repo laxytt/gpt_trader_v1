@@ -15,9 +15,84 @@ from config.settings import get_settings
 from core.infrastructure.mt5.client import MT5Client
 from core.infrastructure.mt5.data_provider import MT5DataProvider
 from core.services.backtesting_service import (
-    BacktestEngine, BacktestConfig, BacktestMode, BacktestReportGenerator
+    BacktestEngine, BacktestConfig, BacktestMode, BacktestReportGenerator, BacktestSignalGenerator
 )
 from core.utils.chart_utils import ChartGenerator
+
+# In run_backtest.py, update the main function
+
+async def run_full_mode_backtest(settings, mt5_client, data_provider):
+    """Run backtest in FULL mode with GPT integration"""
+    
+    # Initialize GPT components
+    from core.infrastructure.gpt.client import GPTClient
+    from core.infrastructure.gpt.signal_generator import GPTSignalGenerator
+    from core.services.signal_service import SignalService
+    from core.services.news_service import NewsService
+    from core.services.memory_service import MemoryService
+    from core.infrastructure.database.repositories import (
+        MemoryCaseRepository, SignalRepository
+    )
+    
+    print("Initializing FULL mode components...")
+    
+    # Create all required services
+    gpt_client = GPTClient(settings.gpt)
+    signal_generator = GPTSignalGenerator(gpt_client)
+    news_service = NewsService(settings.news)
+    memory_case_repo = MemoryCaseRepository(settings.database.db_path)
+    memory_service = MemoryService(memory_case_repo, settings.database)
+    signal_repository = SignalRepository(settings.database.db_path)
+    
+    # Create signal service
+    signal_service = SignalService(
+        data_provider=data_provider,
+        signal_generator=signal_generator,
+        news_service=news_service,
+        memory_service=memory_service,
+        signal_repository=signal_repository,
+        trading_config=settings.trading,
+        enable_offline_validation=True
+    )
+    
+    # Configure backtest for FULL mode
+    config = BacktestConfig(
+        start_date=datetime(2025, 5, 20, tzinfo=timezone.utc),  # Use recent dates
+        end_date=datetime(2025, 5, 27, tzinfo=timezone.utc),    # One week
+        symbols=["EURUSD"],
+        mode=BacktestMode.FULL,
+        initial_balance=10000,
+        risk_per_trade=0.015,
+        max_open_trades=2
+    )
+    
+    # Create backtest signal generator with data provider
+    backtest_signal_gen = BacktestSignalGenerator(
+        signal_service=signal_service,
+        mode=BacktestMode.FULL,
+        data_provider=data_provider  # Pass the data provider
+    )
+    
+    # Create and run engine
+    engine = BacktestEngine(
+        data_provider=data_provider,
+        signal_generator=backtest_signal_gen,
+        chart_generator=ChartGenerator() if ChartGenerator else None,
+        db_path=settings.database.db_path
+    )
+    
+    print(f"Starting FULL mode backtest (with GPT) from {config.start_date.date()} to {config.end_date.date()}")
+    print("WARNING: This will make real GPT API calls and cost money!")
+    print("Press Ctrl+C to cancel...")
+    
+    try:
+        await asyncio.sleep(3)  # Give user time to cancel
+    except KeyboardInterrupt:
+        print("Cancelled by user")
+        return None
+    
+    results = await engine.run_backtest(config)
+    return results
 
 
 async def main():
@@ -87,7 +162,8 @@ async def main():
         # Create backtest engine
         engine = BacktestEngine(
             data_provider=data_provider,
-            chart_generator=ChartGenerator() if ChartGenerator else None
+            chart_generator=ChartGenerator() if ChartGenerator else None,
+            db_path=settings.database.db_path
         )
         
         print(f"Starting backtest for {config.symbols} from {config.start_date.date()} to {config.end_date.date()}")

@@ -19,13 +19,14 @@ from core.domain.models import (
     RiskClass, TradingSignal, Trade, MarketData, Candle, SignalType, 
     TradeStatus, TradeResult, create_trade_id
 )
-from core.domain.exceptions import BacktestingError, ErrorContext
+from core.domain.exceptions import BacktestingError, ErrorContext, InsufficientDataError
+from core.infrastructure.data.unified_data_provider import DataRequest
 from core.services.signal_service import SignalService
 from core.services.offline_validator import OfflineSignalValidator
 from core.infrastructure.mt5.data_provider import MT5DataProvider
 from core.utils.chart_utils import ChartGenerator
 from config.settings import TradingSettings
-from core.infrastructure.database.backtest_repository import BacktestRepository
+from core.utils.data_diagnostics import DataDiagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +114,11 @@ class BacktestResults:
 
 
 class BacktestDataProvider:
-    """Provides historical data for backtesting"""
+    """Provides historical data for backtesting using unified provider"""
     
     def __init__(self, data_provider: MT5DataProvider):
         self.data_provider = data_provider
-        self._cache = {}
+        self.unified_provider = data_provider.unified_provider
     
     async def get_historical_data(
         self, 
@@ -127,54 +128,24 @@ class BacktestDataProvider:
         timeframe: str = "H1"
     ) -> pd.DataFrame:
         """Get historical data for backtesting period"""
-        cache_key = f"{symbol}_{timeframe}_{start_date}_{end_date}"
-        
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-        
-        # Convert string timeframe to TimeFrame enum
-        timeframe_enum = TimeFrame[timeframe]
-        
-        # Calculate bars needed with extra buffer
-        hours_needed = int((end_date - start_date).total_seconds() / 3600)
-        bars_needed = hours_needed + 200  # Add 200 bars buffer for indicators
-        
-        # We need to request data from current time, not from the specific date
-        # MT5 copy_rates_from_pos gets data counting backwards from current time
-        print(f"Requesting {bars_needed} bars for {symbol}")
+        # Create request with date range
+        request = DataRequest(
+            symbol=symbol,
+            timeframe=TimeFrame[timeframe],
+            start_date=start_date,
+            end_date=end_date
+        )
         
         try:
-            market_data = await self.data_provider.get_market_data(
-                symbol=symbol,
-                timeframe=timeframe_enum,
-                bars=bars_needed + 1000  # Request extra to ensure we cover the date range
-            )
+            # Use unified provider
+            market_data = await self.unified_provider.get_data(request)
             
-            if not market_data.candles:
-                print(f"No candles received for {symbol}")
-                return pd.DataFrame()
+            # Convert to DataFrame for backtesting
+            return self._market_data_to_dataframe(market_data)
             
-            # Convert to DataFrame
-            df = self._market_data_to_dataframe(market_data)
-            
-            print(f"Received data from {df.index.min()} to {df.index.max()}")
-            
-            # Filter by date range
-            df_filtered = df[(df.index >= start_date) & (df.index <= end_date)]
-            
-            if df_filtered.empty:
-                print(f"No data in requested range {start_date} to {end_date}")
-                print(f"Available data range: {df.index.min()} to {df.index.max()}")
-            else:
-                print(f"Filtered to {len(df_filtered)} bars for backtesting")
-            
-            self._cache[cache_key] = df_filtered
-            return df_filtered
-            
-        except Exception as e:
-            print(f"Error getting historical data: {e}")
-            import traceback
-            traceback.print_exc()
+        except InsufficientDataError as e:
+            logger.error(f"Insufficient data for {symbol}: {e}")
+            # Return empty DataFrame to allow backtest to continue with other symbols
             return pd.DataFrame()
     
     def _market_data_to_dataframe(self, market_data: MarketData) -> pd.DataFrame:
@@ -199,6 +170,8 @@ class BacktestDataProvider:
         return df
 
 
+# In core/services/backtesting_service.py, update BacktestSignalGenerator
+
 class BacktestSignalGenerator:
     """Generates signals in backtesting mode"""
     
@@ -206,11 +179,13 @@ class BacktestSignalGenerator:
         self, 
         signal_service: Optional[SignalService] = None,
         offline_validator: Optional[OfflineSignalValidator] = None,
-        mode: BacktestMode = BacktestMode.OFFLINE_ONLY
+        mode: BacktestMode = BacktestMode.OFFLINE_ONLY,
+        data_provider: Optional[MT5DataProvider] = None  # Add this
     ):
         self.signal_service = signal_service
         self.offline_validator = offline_validator or OfflineSignalValidator()
         self.mode = mode
+        self.data_provider = data_provider  # Store it
     
     async def generate_signal(
         self, 
@@ -220,8 +195,47 @@ class BacktestSignalGenerator:
         """Generate signal based on backtest mode"""
         
         if self.mode == BacktestMode.FULL and self.signal_service:
-            # Full signal generation with GPT
-            return await self.signal_service.generate_signal(market_data.symbol)
+            # For FULL mode, we need to provide the signal service with proper data
+            # Override the data provider method temporarily
+            if self.data_provider:
+                original_get_market_data = self.signal_service.data_provider.get_market_data
+                
+                # Create a wrapper that provides historical data
+                async def get_historical_market_data(symbol, timeframe, bars):
+                    # Return the market_data we already have
+                    if symbol == market_data.symbol:
+                        return market_data
+                    # For other symbols, use original method
+                    return await original_get_market_data(symbol, timeframe, bars)
+                
+                # Temporarily replace the method
+                self.signal_service.data_provider.get_market_data = get_historical_market_data
+                
+                try:
+                    # Disable news checking for backtesting
+                    self.signal_service.news_service = None
+                    
+                    # Generate signal
+                    signal = await self.signal_service.generate_signal(market_data.symbol)
+                    return signal
+                except Exception as e:
+                    logger.error(f"Full mode signal generation failed: {e}")
+                    # Fallback to offline validation
+                    validation_result = await self.offline_validator.validate_market_data(
+                        market_data,
+                        min_score_threshold=0.6
+                    )
+                    return self._create_signal_from_validation(market_data, validation_result)
+                finally:
+                    # Restore original method
+                    self.signal_service.data_provider.get_market_data = original_get_market_data
+            else:
+                # No data provider, fallback to offline
+                validation_result = await self.offline_validator.validate_market_data(
+                    market_data,
+                    min_score_threshold=0.6
+                )
+                return self._create_signal_from_validation(market_data, validation_result)
         
         elif self.mode == BacktestMode.OFFLINE_ONLY:
             # Use only offline validation
@@ -229,8 +243,6 @@ class BacktestSignalGenerator:
                 market_data,
                 min_score_threshold=0.6
             )
-            
-            # Create signal based on validation
             return self._create_signal_from_validation(market_data, validation_result)
         
         else:
@@ -869,12 +881,14 @@ class BacktestEngine:
         self,
         data_provider: MT5DataProvider,
         signal_generator: Optional[BacktestSignalGenerator] = None,
-        chart_generator: Optional[ChartGenerator] = None
+        chart_generator: Optional[ChartGenerator] = None,
+        db_path: str = "data/trades.db",
     ):
         self.data_provider = BacktestDataProvider(data_provider)
         self.signal_generator = signal_generator or BacktestSignalGenerator()
         self.chart_generator = chart_generator
         self.analyzer = BacktestAnalyzer()
+        self.db_path = db_path
     
     async def run_backtest(self, config: BacktestConfig) -> BacktestResults:
         """Run backtest with given configuration"""
@@ -895,6 +909,7 @@ class BacktestEngine:
             )
             if not df.empty:
                 all_data[symbol] = df
+                logger.info(f"Loaded {len(df)} bars for {symbol}")
             else:
                 logger.warning(f"No data available for {symbol}")
         
@@ -911,6 +926,7 @@ class BacktestEngine:
                 all_dates = all_dates.intersection(set(df.index))
         
         all_dates = sorted(list(all_dates))
+        logger.info(f"Processing {len(all_dates)} common dates across all symbols")
         
         # Process each date
         for date_idx, current_date in enumerate(all_dates[20:], 20):  # Start from bar 20 for indicators
@@ -975,8 +991,8 @@ class BacktestEngine:
             await self._save_results(results)
         
         logger.info(f"Backtest complete: {results.total_trades} trades, "
-                f"{results.win_rate:.1%} win rate, "
-                f"total return: {results.total_return:.2f}%")
+                   f"{results.win_rate:.1%} win rate, "
+                   f"total return: {results.total_return:.2f}%")
         
         return results
 
@@ -1007,7 +1023,7 @@ class BacktestEngine:
         )
 
     async def _save_results(self, results: BacktestResults):
-        """Save backtest results to file"""
+        """Save backtest results to file AND database"""
         results_dir = Path(results.config.results_dir)
         results_dir.mkdir(parents=True, exist_ok=True)
         
@@ -1057,11 +1073,13 @@ class BacktestEngine:
                     'result': trade.result.value if trade.result else None,
                     'exit_reason': trade.exit_reason,
                     'bars_held': trade.bars_held,
-                    'risk_reward_achieved': trade.risk_reward_achieved
+                    'risk_reward_achieved': trade.risk_reward_achieved,
+                    'signal_reason': trade.signal.reason,
+                    'risk_class': trade.signal.risk_class.value
                 }
                 for trade in results.trades
             ],
-            'equity_curve': results.equity_curve,
+            'equity_curve': results.equity_curve[::10],  # Sample every 10th point
             'statistics': results.statistics
         }
         
@@ -1072,17 +1090,16 @@ class BacktestEngine:
         
         logger.info(f"Results saved to {filepath}")
         
-        # Also save a summary report
-        await self._save_summary_report(results, results_dir / f"report_{symbols_str}_{timestamp}.txt")
-
-        # NEW: Save to database for ML
-        try:            
-            repo = BacktestRepository(self.db_path)  # You'll need to pass db_path
+        # Save to database for ML
+        try:
+            from core.infrastructure.database.backtest_repository import BacktestRepository
+            
+            repo = BacktestRepository(self.db_path)
             run_id = repo.save_backtest_run(results)
             
             logger.info(f"Backtest results saved to database with ID: {run_id}")
             
-            # Also store the run_id in the JSON for reference
+            # Store the run_id in the JSON for reference
             results_dict['database_run_id'] = run_id
             
             # Re-save JSON with database reference
@@ -1092,6 +1109,9 @@ class BacktestEngine:
         except Exception as e:
             logger.error(f"Failed to save backtest results to database: {e}")
             # Don't fail the whole backtest if DB save fails
+        
+        # Also save a summary report
+        await self._save_summary_report(results, results_dir / f"report_{symbols_str}_{timestamp}.txt")
 
     async def _save_summary_report(self, results: BacktestResults, filepath: Path):
         """Save human-readable summary report"""

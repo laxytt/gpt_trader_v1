@@ -5,7 +5,7 @@ Coordinates data gathering, analysis, and signal validation.
 
 import logging
 from typing import Optional, Dict, List, Any
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from core.domain.models import (
@@ -16,6 +16,7 @@ from core.domain.exceptions import (
     SignalGenerationError, ErrorContext, ServiceError
 )
 from core.domain.enums import TimeFrame
+from core.infrastructure.data.unified_data_provider import DataRequest
 from core.infrastructure.mt5.data_provider import MT5DataProvider  
 from core.infrastructure.gpt.signal_generator import GPTSignalGenerator
 from core.infrastructure.database.repositories import SignalRepository
@@ -112,9 +113,46 @@ class MarketContextAnalyzer:
 
 
 class SignalService:
-    """
-    Orchestrates trading signal generation by coordinating all required components.
-    Now includes offline validation before GPT calls.    """
+    """Update to use date-based requests for backtesting"""
+    
+    async def generate_signal(
+        self, 
+        symbol: str,
+        as_of_date: Optional[datetime] = None  # Add this parameter
+    ) -> TradingSignal:
+        """
+        Generate signal as of specific date (for backtesting) or current (for live).
+        """
+        if as_of_date:
+            # Backtesting mode - get historical data up to as_of_date
+            h1_request = DataRequest(
+                symbol=symbol,
+                timeframe=TimeFrame.H1,
+                end_date=as_of_date,
+                start_date=as_of_date - timedelta(days=10)  # 10 days of H1 data
+            )
+            h4_request = DataRequest(
+                symbol=symbol,
+                timeframe=TimeFrame.H4,
+                end_date=as_of_date,
+                start_date=as_of_date - timedelta(days=30)  # 30 days of H4 data
+            )
+        else:
+            # Live mode - get recent bars
+            h1_request = DataRequest(
+                symbol=symbol,
+                timeframe=TimeFrame.H1,
+                num_bars=self.trading_config.bars_for_analysis
+            )
+            h4_request = DataRequest(
+                symbol=symbol,
+                timeframe=TimeFrame.H4,
+                num_bars=self.trading_config.bars_for_analysis
+            )
+        
+        # Use unified provider through data_provider
+        h1_data = await self.data_provider.unified_provider.get_data(h1_request)
+        h4_data = await self.data_provider.unified_provider.get_data(h4_request)
     
     def __init__(
         self,
