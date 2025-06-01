@@ -1,0 +1,49 @@
+================================================================================
+BACKTEST RESULTS SUMMARY
+================================================================================
+
+Configuration:
+  Period: 2024-11-26 to 2025-05-25
+  Symbols: EURUSD, GBPUSD, USDCAD
+  Initial Balance: $10,000.00
+  Risk per Trade: 1.5%
+  Mode: offline_only
+
+Performance Summary:
+  Total Trades: 123
+  Winning Trades: 43
+  Losing Trades: 80
+  Win Rate: 35.0%
+  Total P&L: $-2,586.68
+  Total Return: -25.87%
+  Final Balance: $7,203.42
+
+Risk Metrics:
+  Max Drawdown: 31.85%
+  Sharpe Ratio: -0.80
+  Sortino Ratio: -1.06
+  Calmar Ratio: -0.81
+
+Trade Statistics:
+  Average Win: $119.90
+  Average Loss: $-96.78
+  Profit Factor: 0.67
+  Expectancy: $-21.03
+  Avg Bars Held: 15.8
+  Avg RR Achieved: 0.94
+
+Performance by Symbol:
+  EURUSD:
+    Trades: 70
+    Win Rate: 34.3%
+    P&L: $-1,922.80
+  GBPUSD:
+    Trades: 33
+    Win Rate: 30.3%
+    P&L: $-958.75
+  USDCAD:
+    Trades: 20
+    Win Rate: 45.0%
+    P&L: $294.87
+
+================================================================================

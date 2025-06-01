@@ -1,107 +1,112 @@
+# run_backtest.py
 """
-Script to run backtests on the GPT Trading System
+Script to run backtests on the GPT Trading System with improved data handling
 """
 
 import asyncio
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+import logging
+from typing import Dict, List, Tuple
 
 # Add project root to Python path
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
 from config.settings import get_settings
 from core.infrastructure.mt5.client import MT5Client
 from core.infrastructure.mt5.data_provider import MT5DataProvider
 from core.services.backtesting_service import (
-    BacktestEngine, BacktestConfig, BacktestMode, BacktestReportGenerator, BacktestSignalGenerator
+    BacktestEngine, BacktestConfig, BacktestMode, BacktestReportGenerator
 )
 from core.utils.chart_utils import ChartGenerator
+from core.utils.data_diagnostics import DataDiagnostics
 
-# In run_backtest.py, update the main function
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-async def run_full_mode_backtest(settings, mt5_client, data_provider):
-    """Run backtest in FULL mode with GPT integration"""
+
+async def check_data_availability(data_provider: MT5DataProvider, symbols: List[str]):
+    """Check and report data availability for all symbols"""
+    print("\n" + "="*80)
+    print("DATA AVAILABILITY CHECK")
+    print("="*80)
     
-    # Initialize GPT components
-    from core.infrastructure.gpt.client import GPTClient
-    from core.infrastructure.gpt.signal_generator import GPTSignalGenerator
-    from core.services.signal_service import SignalService
-    from core.services.news_service import NewsService
-    from core.services.memory_service import MemoryService
-    from core.infrastructure.database.repositories import (
-        MemoryCaseRepository, SignalRepository
-    )
+    diagnostics = DataDiagnostics(data_provider.unified_provider)
+    report = await diagnostics.generate_availability_report(symbols)
     
-    print("Initializing FULL mode components...")
+    available_symbols = []
+    date_ranges = {}
     
-    # Create all required services
-    gpt_client = GPTClient(settings.gpt)
-    signal_generator = GPTSignalGenerator(gpt_client)
-    news_service = NewsService(settings.news)
-    memory_case_repo = MemoryCaseRepository(settings.database.db_path)
-    memory_service = MemoryService(memory_case_repo, settings.database)
-    signal_repository = SignalRepository(settings.database.db_path)
+    for symbol, info in report['symbols'].items():
+        if info['available']:
+            available_symbols.append(symbol)
+            start = datetime.fromisoformat(info['start_date'])
+            end = datetime.fromisoformat(info['end_date'])
+            date_ranges[symbol] = (start, end)
+            
+            print(f"\n{symbol}:")
+            print(f"  Date Range: {start.date()} to {end.date()} ({info['total_days']} days)")
+            print(f"  Timeframes:")
+            for tf, tf_info in info['timeframes'].items():
+                if tf_info['available']:
+                    print(f"    {tf}: ✓ {tf_info['bars_available']} bars available")
+                else:
+                    print(f"    {tf}: ✗ {tf_info.get('error', 'Not available')}")
+        else:
+            print(f"\n{symbol}: ✗ {info.get('error', 'Not available')}")
     
-    # Create signal service
-    signal_service = SignalService(
-        data_provider=data_provider,
-        signal_generator=signal_generator,
-        news_service=news_service,
-        memory_service=memory_service,
-        signal_repository=signal_repository,
-        trading_config=settings.trading,
-        enable_offline_validation=True
-    )
+    print("\n" + "="*80)
     
-    # Configure backtest for FULL mode
-    config = BacktestConfig(
-        start_date=datetime(2025, 5, 20, tzinfo=timezone.utc),  # Use recent dates
-        end_date=datetime(2025, 5, 27, tzinfo=timezone.utc),    # One week
-        symbols=["EURUSD"],
-        mode=BacktestMode.FULL,
-        initial_balance=10000,
-        risk_per_trade=0.015,
-        max_open_trades=2
-    )
+    return available_symbols, date_ranges
+
+
+async def determine_backtest_period(date_ranges: Dict[str, Tuple[datetime, datetime]]):
+    """Determine optimal backtest period based on available data"""
+    if not date_ranges:
+        return None, None
     
-    # Create backtest signal generator with data provider
-    backtest_signal_gen = BacktestSignalGenerator(
-        signal_service=signal_service,
-        mode=BacktestMode.FULL,
-        data_provider=data_provider  # Pass the data provider
-    )
+    # Find common date range
+    latest_start = max(start for start, _ in date_ranges.values())
+    earliest_end = min(end for _, end in date_ranges.values())
     
-    # Create and run engine
-    engine = BacktestEngine(
-        data_provider=data_provider,
-        signal_generator=backtest_signal_gen,
-        chart_generator=ChartGenerator() if ChartGenerator else None,
-        db_path=settings.database.db_path
-    )
+    if latest_start >= earliest_end:
+        print("\nNo overlapping data period found across symbols!")
+        return None, None
     
-    print(f"Starting FULL mode backtest (with GPT) from {config.start_date.date()} to {config.end_date.date()}")
-    print("WARNING: This will make real GPT API calls and cost money!")
-    print("Press Ctrl+C to cancel...")
+    # Calculate available period
+    available_days = (earliest_end - latest_start).days
     
-    try:
-        await asyncio.sleep(3)  # Give user time to cancel
-    except KeyboardInterrupt:
-        print("Cancelled by user")
-        return None
+    print(f"\nCommon data period: {latest_start.date()} to {earliest_end.date()} ({available_days} days)")
     
-    results = await engine.run_backtest(config)
-    return results
+    # Determine backtest period based on available data
+    if available_days < 30:
+        print("Warning: Less than 30 days of data available!")
+        return latest_start, earliest_end
+    
+    # Use last 6 months or available data, whichever is smaller
+    ideal_days = 180  # 6 months
+    actual_days = min(ideal_days, available_days - 10)  # Leave some buffer
+    
+    backtest_end = earliest_end - timedelta(days=5)  # Small buffer from end
+    backtest_start = backtest_end - timedelta(days=actual_days)
+    
+    # Ensure start is not before available data
+    backtest_start = max(backtest_start, latest_start + timedelta(days=5))
+    
+    return backtest_start, backtest_end
 
 
 async def main():
-    """Run backtest with current configuration"""
+    """Run backtest with improved data handling"""
     
     # Load settings
     settings = get_settings()
     
     # Initialize MT5 client
+    print("Initializing MT5 connection...")
     mt5_client = MT5Client(settings.mt5)
     if not mt5_client.initialize():
         print("Failed to initialize MT5")
@@ -111,48 +116,41 @@ async def main():
         # Create data provider
         data_provider = MT5DataProvider(mt5_client)
         
-        # First, check available data range for each symbol
-        print("\nChecking available data ranges...")
-        available_ranges = {}
-        
-        for symbol in settings.trading.symbols[:2]:
-            try:
-                # Use the unified provider to check date range
-                start_date, end_date = data_provider.unified_provider.get_available_date_range(symbol)
-                available_ranges[symbol] = (start_date, end_date)
-                print(f"{symbol}: {start_date.date()} to {end_date.date()}")
-            except Exception as e:
-                print(f"{symbol}: No data available - {e}")
-        
-        if not available_ranges:
-            print("No data available for any symbols!")
-            return
-        
-        # Find the common date range across all symbols
-        latest_start = max(start for start, _ in available_ranges.values())
-        earliest_end = min(end for _, end in available_ranges.values())
-        
-        print(f"\nCommon data range: {latest_start.date()} to {earliest_end.date()}")
-        
-        # Adjust backtest config to use available data
-        # For demo accounts, typically use the last 6-12 months
-        backtest_end = earliest_end
-        backtest_start = max(
-            latest_start,
-            backtest_end - timedelta(days=180)  # 6 months
+        # Check data availability
+        symbols_to_test = settings.trading.symbols[:3]  # Test first 3 symbols
+        available_symbols, date_ranges = await check_data_availability(
+            data_provider, symbols_to_test
         )
         
+        if not available_symbols:
+            print("\nNo data available for any symbols!")
+            return
+        
+        # Determine backtest period
+        backtest_start, backtest_end = await determine_backtest_period(date_ranges)
+        
+        if not backtest_start or not backtest_end:
+            print("\nCannot determine valid backtest period!")
+            return
+        
+        # Create backtest configuration
         config = BacktestConfig(
             start_date=backtest_start,
             end_date=backtest_end,
-            symbols=list(available_ranges.keys()),
+            symbols=available_symbols,
             mode=BacktestMode.OFFLINE_ONLY,
             initial_balance=10000,
             risk_per_trade=settings.trading.risk_per_trade_percent / 100,
-            max_open_trades=settings.trading.max_open_trades
+            max_open_trades=settings.trading.max_open_trades,
+            save_results=True
         )
         
-        print(f"\nStarting backtest from {config.start_date.date()} to {config.end_date.date()}")
+        print(f"\nBacktest Configuration:")
+        print(f"  Period: {config.start_date.date()} to {config.end_date.date()}")
+        print(f"  Symbols: {', '.join(config.symbols)}")
+        print(f"  Mode: {config.mode.value}")
+        print(f"  Initial Balance: ${config.initial_balance:,.2f}")
+        print(f"  Risk per Trade: {config.risk_per_trade*100:.1f}%")
         
         # Create backtest engine
         engine = BacktestEngine(
@@ -161,38 +159,52 @@ async def main():
             db_path=settings.database.db_path
         )
         
-        # Run backtest
-        results = await engine.run_backtest(config)
-
-        # Create backtest engine
-        engine = BacktestEngine(
-            data_provider=data_provider,
-            chart_generator=ChartGenerator() if ChartGenerator else None,
-            db_path=settings.database.db_path
-        )
-        
-        print(f"Starting backtest for {config.symbols} from {config.start_date.date()} to {config.end_date.date()}")
+        print(f"\nStarting backtest...")
+        print("-" * 80)
         
         # Run backtest
         results = await engine.run_backtest(config)
         
-        # Print summary
-        print(f"\nBacktest Results:")
+        # Print results
+        print("\n" + "="*80)
+        print("BACKTEST RESULTS")
+        print("="*80)
         print(f"Total Trades: {results.total_trades}")
+        print(f"Winning Trades: {results.winning_trades}")
+        print(f"Losing Trades: {results.losing_trades}")
         print(f"Win Rate: {results.win_rate:.1%}")
+        print(f"Total P&L: ${results.total_pnl:,.2f}")
         print(f"Total Return: {results.total_return:.2f}%")
         print(f"Max Drawdown: {results.max_drawdown:.2f}%")
         print(f"Sharpe Ratio: {results.sharpe_ratio:.2f}")
+        print(f"Sortino Ratio: {results.sortino_ratio:.2f}")
         print(f"Profit Factor: {results.profit_factor:.2f}")
+        print(f"Average Trade Duration: {results.average_bars_held:.1f} hours")
         
-        # Generate reports
-        report_generator = BacktestReportGenerator(ChartGenerator() if ChartGenerator else None)
-        await report_generator.generate_report(results, "backtest_results")
+        # Performance by symbol
+        if 'by_symbol' in results.statistics:
+            print("\nPerformance by Symbol:")
+            print("-" * 40)
+            for symbol, stats in results.statistics['by_symbol'].items():
+                print(f"{symbol}:")
+                print(f"  Trades: {stats['trades']}")
+                print(f"  Win Rate: {stats['win_rate']:.1%}")
+                print(f"  P&L: ${stats['pnl']:,.2f}")
         
-        print("\nReports saved to backtest_results/")
+        # Generate detailed reports
+        if results.total_trades > 0:
+            print("\nGenerating reports...")
+            report_generator = BacktestReportGenerator(ChartGenerator() if ChartGenerator else None)
+            await report_generator.generate_report(results, "backtest_results")
+            print("Reports saved to backtest_results/")
+        else:
+            print("\nNo trades executed - skipping report generation")
         
+    except Exception as e:
+        logger.exception(f"Backtest failed: {e}")
     finally:
         mt5_client.shutdown()
+        print("\nMT5 connection closed")
 
 
 if __name__ == "__main__":

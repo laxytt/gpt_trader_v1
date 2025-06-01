@@ -409,8 +409,7 @@ class UnifiedDataProvider:
         if request.num_bars and request.num_bars <= 0:
             raise ValueError("Number of bars must be positive")
     
-    @lru_cache(maxsize=100)
-    def get_available_date_range(self, symbol: str) -> Tuple[datetime, datetime]:
+    async def get_available_date_range(self, symbol: str) -> Tuple[datetime, datetime]:
         """Get available date range for symbol (cached)"""
         if symbol in self._available_data_cache:
             return self._available_data_cache[symbol]
@@ -418,7 +417,7 @@ class UnifiedDataProvider:
         # Fetch minimal data to determine range
         try:
             # Get oldest data
-            df_old = asyncio.run(self._fetch_from_mt5(symbol, TimeFrame.D1, 10000))
+            df_old = await self._fetch_from_mt5(symbol, TimeFrame.D1, 10000)
             
             if df_old.empty:
                 raise DataError(f"No data available for {symbol}")

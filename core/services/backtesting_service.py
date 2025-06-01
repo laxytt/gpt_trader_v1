@@ -36,6 +36,8 @@ class BacktestMode(Enum):
     FULL = "full"  # Run all components including GPT
     OFFLINE_ONLY = "offline_only"  # Only offline validation
     HISTORICAL = "historical"  # Use historical signals
+    ML_DRIVEN = "ml_driven"  # Use ML model predictions
+    LIVE_MODEL = "live_model"  # Test current production model
 
 
 @dataclass

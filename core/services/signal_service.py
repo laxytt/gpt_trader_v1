@@ -4,7 +4,9 @@ Coordinates data gathering, analysis, and signal validation.
 """
 
 import logging
-from typing import Optional, Dict, List, Any
+import asyncio
+import numpy as np
+from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,6 +25,8 @@ from core.infrastructure.database.repositories import SignalRepository
 from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
 from core.services.offline_validator import OfflineSignalValidator
+from core.services.model_management_service import ModelManagementService
+from core.ml.feature_engineering import FeatureEngineer
 from core.utils.chart_utils import ChartGenerator, create_market_data_chart
 from core.utils.error_handling import with_error_recovery
 from core.utils.validation import SignalValidator
@@ -164,7 +168,9 @@ class SignalService:
         trading_config: TradingSettings,
         chart_generator: Optional[ChartGenerator] = None,
         screenshots_dir: str = "screenshots",
-        enable_offline_validation: bool = True
+        enable_offline_validation: bool = True,
+        model_management_service: Optional[ModelManagementService] = None,
+        ml_confidence_threshold: float = 0.7
     ):
         self.data_provider = data_provider
         self.signal_generator = signal_generator
@@ -190,6 +196,17 @@ class SignalService:
         else:
             self.offline_validator = None
             logger.info("Offline signal validation disabled")
+            
+        # Initialize ML components
+        self.model_management_service = model_management_service
+        self.ml_confidence_threshold = ml_confidence_threshold
+        self.feature_engineer = FeatureEngineer() if model_management_service else None
+        self._ml_model = None
+        self._ml_metadata = None
+        
+        # Load active ML model if available
+        if self.model_management_service:
+            asyncio.create_task(self._load_ml_model())
     
     async def generate_signal(self, symbol: str) -> TradingSignal:
         """
@@ -616,6 +633,242 @@ class SignalService:
                 results[symbol] = self._create_fallback_signal(symbol, str(e))
         
         return results
+    
+    async def _load_ml_model(self):
+        """Load the active ML model for signal generation"""
+        try:
+            result = await self.model_management_service.get_active_model('signal_classifier')
+            if result:
+                self._ml_model, self._ml_metadata = result
+                logger.info(f"ML model loaded: {self._ml_metadata.model_id}")
+            else:
+                logger.warning("No active ML model found for signal generation")
+        except Exception as e:
+            logger.error(f"Failed to load ML model: {e}")
+    
+    async def generate_signal_with_ml(self, symbol: str) -> TradingSignal:
+        """
+        Generate trading signal using ML model as primary decision maker.
+        Falls back to GPT if ML confidence is low.
+        """
+        with ErrorContext("ML signal generation", symbol=symbol) as ctx:
+            try:
+                # Step 1: Gather market data
+                ctx.add_detail("step", "data_gathering")
+                market_data = await self._gather_market_data(symbol)
+                
+                # Step 2: Feature engineering
+                ctx.add_detail("step", "feature_engineering")
+                features, feature_names = await self._prepare_ml_features(
+                    symbol, market_data['h1'], market_data['h4']
+                )
+                
+                # Step 3: ML prediction
+                ctx.add_detail("step", "ml_prediction")
+                ml_signal, confidence = await self._get_ml_prediction(features, feature_names)
+                
+                # Step 4: Check confidence threshold
+                if confidence >= self.ml_confidence_threshold:
+                    # High confidence - use ML prediction directly
+                    logger.info(f"ML signal for {symbol}: {ml_signal} (confidence: {confidence:.2f})")
+                    return await self._create_ml_based_signal(
+                        symbol, ml_signal, confidence, market_data
+                    )
+                else:
+                    # Low confidence - validate with GPT
+                    logger.info(f"ML confidence low ({confidence:.2f}), validating with GPT")
+                    return await self._validate_ml_signal_with_gpt(
+                        symbol, ml_signal, confidence, market_data
+                    )
+                    
+            except Exception as e:
+                logger.error(f"ML signal generation failed: {e}")
+                # Fall back to standard GPT-based generation
+                return await self.generate_signal(symbol)
+    
+    async def _prepare_ml_features(
+        self, 
+        symbol: str, 
+        h1_data: MarketData, 
+        h4_data: MarketData
+    ) -> Tuple[np.ndarray, List[str]]:
+        """Prepare features for ML model"""
+        if not self.feature_engineer:
+            raise ServiceError("Feature engineer not initialized")
+        
+        # Convert market data to DataFrame format
+        h1_df = self._market_data_to_dataframe(h1_data)
+        h4_df = self._market_data_to_dataframe(h4_data)
+        
+        # Engineer features
+        features_df = self.feature_engineer.engineer_features(h1_df)
+        
+        # Add H4 context features
+        h4_features = self._extract_h4_context_features(h4_df)
+        for name, value in h4_features.items():
+            features_df[name] = value
+        
+        # Get the latest row (current market state)
+        latest_features = features_df.iloc[-1]
+        
+        # Convert to numpy array
+        feature_values = latest_features.values.reshape(1, -1)
+        feature_names = latest_features.index.tolist()
+        
+        return feature_values, feature_names
+    
+    async def _get_ml_prediction(
+        self, 
+        features: np.ndarray, 
+        feature_names: List[str]
+    ) -> Tuple[SignalType, float]:
+        """Get prediction from ML model"""
+        if not self._ml_model:
+            raise ServiceError("ML model not loaded")
+        
+        # Validate features match model expectations
+        expected_features = self._ml_metadata.feature_names
+        if len(feature_names) != len(expected_features):
+            raise ServiceError(
+                f"Feature mismatch: expected {len(expected_features)}, "
+                f"got {len(feature_names)}"
+            )
+        
+        # Get prediction and probability
+        prediction = self._ml_model.predict(features)[0]
+        probabilities = self._ml_model.predict_proba(features)[0]
+        
+        # Map prediction to signal type
+        signal_map = {0: SignalType.WAIT, 1: SignalType.BUY, 2: SignalType.SELL}
+        signal_type = signal_map.get(prediction, SignalType.WAIT)
+        
+        # Get confidence (max probability)
+        confidence = float(np.max(probabilities))
+        
+        return signal_type, confidence
+    
+    async def _create_ml_based_signal(
+        self,
+        symbol: str,
+        signal_type: SignalType,
+        confidence: float,
+        market_data: Dict[str, MarketData]
+    ) -> TradingSignal:
+        """Create trading signal from ML prediction"""
+        # Get current price data
+        h1_data = market_data['h1']
+        current_candle = h1_data.candles[-1]
+        
+        # Calculate risk parameters
+        atr = current_candle.atr14 or 0.0001
+        
+        # Set SL/TP based on signal type and ATR
+        if signal_type == SignalType.BUY:
+            stop_loss = current_candle.close - (2 * atr)
+            take_profit = current_candle.close + (3 * atr)
+        elif signal_type == SignalType.SELL:
+            stop_loss = current_candle.close + (2 * atr)
+            take_profit = current_candle.close - (3 * atr)
+        else:
+            stop_loss = 0.0
+            take_profit = 0.0
+        
+        # Determine risk class based on confidence
+        if confidence >= 0.85:
+            risk_class = RiskClass.A
+        elif confidence >= 0.75:
+            risk_class = RiskClass.B
+        else:
+            risk_class = RiskClass.C
+        
+        return TradingSignal(
+            symbol=symbol,
+            signal=signal_type,
+            confidence=int(confidence * 100),
+            entry_price=current_candle.close,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_class=risk_class,
+            rationale=f"ML model prediction with {confidence:.1%} confidence",
+            timestamp=datetime.now(timezone.utc),
+            metadata={
+                'ml_model_id': self._ml_metadata.model_id,
+                'ml_confidence': confidence,
+                'source': 'ml_primary'
+            }
+        )
+    
+    async def _validate_ml_signal_with_gpt(
+        self,
+        symbol: str,
+        ml_signal: SignalType,
+        ml_confidence: float,
+        market_data: Dict[str, MarketData]
+    ) -> TradingSignal:
+        """Validate low-confidence ML signal with GPT"""
+        # Add ML context to market analysis
+        enhanced_context = {
+            'ml_prediction': ml_signal.value,
+            'ml_confidence': ml_confidence,
+            'ml_model_id': self._ml_metadata.model_id if self._ml_metadata else None
+        }
+        
+        # Get standard signal with ML context
+        signal = await self.generate_signal(symbol)
+        
+        # Add ML metadata to signal
+        if hasattr(signal, 'metadata'):
+            signal.metadata = signal.metadata or {}
+            signal.metadata.update(enhanced_context)
+            signal.metadata['source'] = 'ml_validated_by_gpt'
+        
+        return signal
+    
+    def _market_data_to_dataframe(self, market_data: MarketData):
+        """Convert MarketData to pandas DataFrame"""
+        import pandas as pd
+        
+        data = []
+        for candle in market_data.candles:
+            data.append({
+                'timestamp': candle.timestamp,
+                'open': candle.open,
+                'high': candle.high,
+                'low': candle.low,
+                'close': candle.close,
+                'volume': candle.volume,
+                'ema50': candle.ema50,
+                'ema200': candle.ema200,
+                'rsi14': candle.rsi14,
+                'atr14': candle.atr14
+            })
+        
+        df = pd.DataFrame(data)
+        df.set_index('timestamp', inplace=True)
+        return df
+    
+    def _extract_h4_context_features(self, h4_df) -> Dict[str, float]:
+        """Extract context features from H4 timeframe"""
+        features = {}
+        
+        if len(h4_df) > 0:
+            # Trend on H4
+            features['h4_trend'] = 1 if h4_df['close'].iloc[-1] > h4_df['ema50'].iloc[-1] else -1
+            
+            # H4 momentum
+            if len(h4_df) >= 10:
+                features['h4_momentum'] = (h4_df['close'].iloc[-1] / h4_df['close'].iloc[-10] - 1) * 100
+            else:
+                features['h4_momentum'] = 0.0
+            
+            # H4 volatility
+            features['h4_volatility'] = h4_df['atr14'].iloc[-1] if 'atr14' in h4_df else 0.0
+        else:
+            features['h4_trend'] = 0
+            features['h4_momentum'] = 0.0
+            features['h4_volatility'] = 0.0
+        
+        return features
 
 
 # Export main service

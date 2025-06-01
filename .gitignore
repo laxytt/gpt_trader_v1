@@ -1,6 +1,7 @@
 .venv/
 
 venv/
+venv_wsl/
 
 *_pycache_/
 

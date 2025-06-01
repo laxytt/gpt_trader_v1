@@ -22,6 +22,7 @@ from core.infrastructure.database.repositories import TradeRepository
 from core.infrastructure.gpt.reflection_generator import GPTReflectionGenerator
 from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
+from core.services.portfolio_risk_service import PortfolioRiskManager
 from core.utils.validation import TradeValidator
 from config.settings import TradingSettings
 
@@ -269,13 +270,15 @@ class TradeService:
         news_service: NewsService,
         memory_service: MemoryService,
         gpt_client: GPTClient,
-        trading_config: TradingSettings
+        trading_config: TradingSettings,
+        portfolio_risk_manager: Optional[PortfolioRiskManager] = None
     ):
         self.order_manager = order_manager
         self.trade_repository = trade_repository
         self.news_service = news_service
         self.memory_service = memory_service
         self.trading_config = trading_config
+        self.portfolio_risk_manager = portfolio_risk_manager
         
         # Initialize components
         self.management_analyzer = TradeManagementAnalyzer(gpt_client)
@@ -318,6 +321,33 @@ class TradeService:
                     raise RiskManagementError(
                         f"Maximum open trades limit reached: {len(open_trades)}/{self.trading_config.max_open_trades}"
                     )
+                
+                # Check portfolio-level risk constraints
+                if self.portfolio_risk_manager:
+                    is_allowed, risk_details = await self.portfolio_risk_manager.check_signal_risk(signal)
+                    
+                    if not is_allowed:
+                        failed_checks = [
+                            f"{check}: {details['message']}"
+                            for check, details in risk_details['risk_checks'].items()
+                            if not details['passed']
+                        ]
+                        raise RiskManagementError(
+                            f"Portfolio risk checks failed: {', '.join(failed_checks)}"
+                        )
+                    
+                    # Use risk-adjusted position size
+                    suggested_size = risk_details.get('suggested_position_size')
+                    if suggested_size and suggested_size < self.trading_config.risk_per_trade_percent / 100:
+                        logger.info(
+                            f"Adjusting position size from {self.trading_config.risk_per_trade_percent}% "
+                            f"to {suggested_size * 100:.1f}% based on portfolio risk"
+                        )
+                        # Adjust risk amount based on suggested size
+                        if not risk_amount_usd:
+                            account_info = self.order_manager.mt5_client.get_account_info()
+                            if account_info:
+                                risk_amount_usd = account_info['balance'] * suggested_size
                 
                 # Execute trade through order manager
                 trade = self.order_manager.execute_signal(signal, risk_amount_usd)

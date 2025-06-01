@@ -29,6 +29,8 @@ from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
 from core.services.market_service import MarketService
 from core.services.trading_orchestrator import TradingOrchestrator
+from core.services.model_management_service import ModelManagementService, ModelRepository
+from core.services.portfolio_risk_service import PortfolioRiskManager
 from core.utils.chart_utils import ChartGenerator
 from core.infrastructure.notifications.telegram import TelegramNotifier
 
@@ -115,6 +117,11 @@ class DependencyContainer:
         return self.get_or_create('memory_case_repository',
             lambda: MemoryCaseRepository(self.settings.database.db_path))
     
+    def model_repository(self) -> ModelRepository:
+        """Create model repository"""
+        return self.get_or_create('model_repository',
+            lambda: ModelRepository(self.settings.database.db_path))
+    
     # GPT Components
     
     def signal_generator(self) -> GPTSignalGenerator:
@@ -148,6 +155,23 @@ class DependencyContainer:
                 self.mt5_client()
             ))
     
+    def model_management_service(self) -> ModelManagementService:
+        """Create model management service"""
+        return self.get_or_create('model_management_service',
+            lambda: ModelManagementService(
+                models_dir=self.settings.paths.base_dir / "models",
+                model_repository=self.model_repository()
+            ))
+    
+    def portfolio_risk_manager(self) -> PortfolioRiskManager:
+        """Create portfolio risk manager"""
+        return self.get_or_create('portfolio_risk_manager',
+            lambda: PortfolioRiskManager(
+                trade_repository=self.trade_repository(),
+                mt5_client=self.mt5_client(),
+                trading_config=self.settings.trading
+            ))
+    
     def signal_service(self) -> SignalService:
         """Create signal service"""
         return self.get_or_create('signal_service',
@@ -159,7 +183,8 @@ class DependencyContainer:
                 signal_repository=self.signal_repository(),
                 trading_config=self.settings.trading,
                 chart_generator=self.chart_generator(),
-                screenshots_dir=str(self.settings.paths.screenshots_dir)
+                screenshots_dir=str(self.settings.paths.screenshots_dir),
+                model_management_service=self.model_management_service()
             ))
     
     def trade_service(self) -> TradeService:
@@ -171,7 +196,8 @@ class DependencyContainer:
                 news_service=self.news_service(),
                 memory_service=self.memory_service(),
                 gpt_client=self.gpt_client(),
-                trading_config=self.settings.trading
+                trading_config=self.settings.trading,
+                portfolio_risk_manager=self.portfolio_risk_manager()
             ))
     
     def trading_orchestrator(self) -> TradingOrchestrator:

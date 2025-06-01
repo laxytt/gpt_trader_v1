@@ -1,12 +1,14 @@
 # core/utils/data_diagnostics.py
 """Diagnostic utilities for data availability and quality"""
 
-from asyncio.log import logger
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from core.domain.enums.mt5_enums import TimeFrame
+from typing import Dict, List, Optional, Any
+
+from schedule import logger
+
 from core.domain.models import MarketData
 from core.infrastructure.data.unified_data_provider import DataRequest, UnifiedDataProvider
+from core.domain.enums import TimeFrame
 
 
 class DataDiagnostics:
@@ -24,7 +26,7 @@ class DataDiagnostics:
         
         for symbol in symbols:
             try:
-                start_date, end_date = self.provider.get_available_date_range(symbol)
+                start_date, end_date = await self.provider.get_available_date_range(symbol)
                 
                 report['symbols'][symbol] = {
                     'available': True,

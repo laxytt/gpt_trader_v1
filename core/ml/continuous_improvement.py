@@ -11,7 +11,6 @@ from core.ml.model_trainer import TradingModelPipeline
 from core.services.backtesting_service import BacktestConfig, BacktestMode, BacktestResults
 import schedule
 
-from core.services.notification_service import NotificationService
 
 
 class ContinuousImprovementEngine:
@@ -22,11 +21,9 @@ class ContinuousImprovementEngine:
     def __init__(
         self,
         model_pipeline: TradingModelPipeline,
-        notification_service: NotificationService,
         config: Dict[str, Any]
     ):
         self.model_pipeline = model_pipeline
-        self.notification_service = notification_service
         self.config = config
         self.performance_history = []
     

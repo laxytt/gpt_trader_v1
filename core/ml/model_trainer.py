@@ -179,3 +179,19 @@ class TradingModelPipeline:
             oos_results.max_drawdown <= criteria['max_oos_drawdown'] and
             oos_results.win_rate >= criteria['min_oos_win_rate']
         )
+    
+    async def _save_model(self, symbol: str, model: Any):
+        """Save trained model using ModelManagementService"""
+        # This method needs to be integrated with ModelManagementService
+        # For now, we'll use joblib directly
+        from pathlib import Path
+        
+        models_dir = Path("models")
+        models_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{symbol}_model_{timestamp}.pkl"
+        filepath = models_dir / filename
+        
+        joblib.dump(model, filepath)
+        logger.info(f"Model saved to {filepath}")

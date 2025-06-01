@@ -20,6 +20,7 @@ from core.domain.exceptions import (
     ErrorContext, ErrorMessages
 )
 from core.domain.enums import GPTModels
+from core.utils.circuit_breaker import gpt_circuit_breaker
 
 
 logger = logging.getLogger(__name__)
@@ -124,8 +125,9 @@ class GPTClient:
         
         self.last_request_time = time.time()
     
+    @gpt_circuit_breaker
     async def _execute_with_retries(self, request_params: Dict[str, Any]) -> Any:
-        """Execute API request with retry logic"""
+        """Execute API request with retry logic and circuit breaker protection"""
         last_exception = None
         
         for attempt in range(self.config.max_retries):
