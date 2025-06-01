@@ -5,7 +5,7 @@ Script to run backtests on the GPT Trading System
 import asyncio
 import sys
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Add project root to Python path
 project_root = Path(__file__).resolve().parent.parent
@@ -98,7 +98,7 @@ async def run_full_mode_backtest(settings, mt5_client, data_provider):
 async def main():
     """Run backtest with current configuration"""
     
-        # Load settings
+    # Load settings
     settings = get_settings()
     
     # Initialize MT5 client
@@ -107,57 +107,62 @@ async def main():
         print("Failed to initialize MT5")
         return
     
-    # Add MT5 connection check
-    account_info = mt5_client.get_account_info()
-    if account_info:
-        print(f"MT5 Connected - Account: {account_info.get('login', 'Unknown')}")
-    else:
-        print("MT5 connected but cannot get account info")
-    
-    # Check if symbol exists
-    symbol_info = mt5_client.get_symbol_info("EURUSD")
-    if symbol_info:
-        print(f"Symbol EURUSD found: {symbol_info.get('description', 'No description')}")
-    else:
-        print("Symbol EURUSD not found in MT5")
-    
     try:
         # Create data provider
         data_provider = MT5DataProvider(mt5_client)
         
-        # Test data retrieval directly
-        from core.domain.enums import TimeFrame
-        print("Testing direct data retrieval...")
-        test_data = await data_provider.get_market_data(
-            symbol="EURUSD",
-            timeframe=TimeFrame.H1,
-            bars=1000  # Get more bars to ensure we have data
+        # First, check available data range for each symbol
+        print("\nChecking available data ranges...")
+        available_ranges = {}
+        
+        for symbol in settings.trading.symbols[:2]:
+            try:
+                # Use the unified provider to check date range
+                start_date, end_date = data_provider.unified_provider.get_available_date_range(symbol)
+                available_ranges[symbol] = (start_date, end_date)
+                print(f"{symbol}: {start_date.date()} to {end_date.date()}")
+            except Exception as e:
+                print(f"{symbol}: No data available - {e}")
+        
+        if not available_ranges:
+            print("No data available for any symbols!")
+            return
+        
+        # Find the common date range across all symbols
+        latest_start = max(start for start, _ in available_ranges.values())
+        earliest_end = min(end for _, end in available_ranges.values())
+        
+        print(f"\nCommon data range: {latest_start.date()} to {earliest_end.date()}")
+        
+        # Adjust backtest config to use available data
+        # For demo accounts, typically use the last 6-12 months
+        backtest_end = earliest_end
+        backtest_start = max(
+            latest_start,
+            backtest_end - timedelta(days=180)  # 6 months
         )
-        print(f"Retrieved {len(test_data.candles)} candles")
-        if test_data.candles:
-            print(f"Date range: {test_data.candles[0].timestamp} to {test_data.candles[-1].timestamp}")
         
-        
-        # Configure backtest - OFFLINE 2024 2025
         config = BacktestConfig(
-            start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            end_date=datetime(2024, 12, 31, tzinfo=timezone.utc),
-            symbols=settings.trading.symbols[:2],  # Use first 2 symbols from config
+            start_date=backtest_start,
+            end_date=backtest_end,
+            symbols=list(available_ranges.keys()),
             mode=BacktestMode.OFFLINE_ONLY,
             initial_balance=10000,
             risk_per_trade=settings.trading.risk_per_trade_percent / 100,
             max_open_trades=settings.trading.max_open_trades
         )
         
-        # # Test one month with real GPT
-        # config = BacktestConfig(
-        # start_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        # end_date=datetime(2024, 1, 7, tzinfo=timezone.utc),
-        # symbols=["EURUSD"],
-        # mode=BacktestMode.FULL,
-        # initial_balance=10000,
-        # risk_per_trade=0.015
-        # )
+        print(f"\nStarting backtest from {config.start_date.date()} to {config.end_date.date()}")
+        
+        # Create backtest engine
+        engine = BacktestEngine(
+            data_provider=data_provider,
+            chart_generator=ChartGenerator() if ChartGenerator else None,
+            db_path=settings.database.db_path
+        )
+        
+        # Run backtest
+        results = await engine.run_backtest(config)
 
         # Create backtest engine
         engine = BacktestEngine(
