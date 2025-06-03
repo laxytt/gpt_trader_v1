@@ -23,6 +23,10 @@ from core.utils.validation import validate_symbol_format
 from config.settings import TradingSettings
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from config.settings import Settings
+
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +48,15 @@ class SymbolProcessor:
         self,
         signal_service: SignalService,
         trade_service: TradeService,
-        news_service: NewsService
+        news_service: NewsService,
+        trading_settings: TradingSettings,
+        orchestrator: Optional['TradingOrchestrator'] = None
     ):
         self.signal_service = signal_service
         self.trade_service = trade_service
         self.news_service = news_service
+        self.trading_settings = trading_settings
+        self.orchestrator = orchestrator
     
     async def process_symbol(self, symbol: str) -> Dict[str, Any]:
         """
@@ -101,8 +109,17 @@ class SymbolProcessor:
                         result['error'] = 'Symbol not ready for analysis'
                         return result
                     
-                    # Generate signal
-                    signal = await self.signal_service.generate_signal(symbol)
+                    # Generate signal - use ML if enabled
+                    ml_enabled = (self.orchestrator and self.orchestrator.settings and 
+                                 hasattr(self.orchestrator.settings, 'ml') and 
+                                 self.orchestrator.settings.ml.enabled)
+                    
+                    if ml_enabled and hasattr(self.signal_service, 'generate_signal_with_ml'):
+                        logger.info(f"Using ML-based signal generation for {symbol}")
+                        signal = await self.signal_service.generate_signal_with_ml(symbol)
+                    else:
+                        signal = await self.signal_service.generate_signal(symbol)
+                    
                     result['signal'] = {
                         'type': signal.signal.value,
                         'risk_class': signal.risk_class.value,
@@ -147,10 +164,27 @@ class TradingScheduler:
         self.end_hour = trading_config.end_hour
     
     def is_trading_hours(self, now: Optional[datetime] = None) -> bool:
-        """Check if current time is within trading hours"""
+        """Check if current time is within trading hours and forex market is open"""
         if now is None:
             now = datetime.now(timezone.utc)
         
+        # Check if forex market is closed (Friday 22:00 UTC to Sunday 22:00 UTC)
+        weekday = now.weekday()  # Monday=0, Sunday=6
+        hour = now.hour
+        
+        # Market closed on Saturday
+        if weekday == 5:  # Saturday
+            return False
+        
+        # Market closed Friday after 22:00 UTC
+        if weekday == 4 and hour >= 22:  # Friday
+            return False
+            
+        # Market closed Sunday before 22:00 UTC
+        if weekday == 6 and hour < 22:  # Sunday
+            return False
+        
+        # Check configured trading hours
         current_hour = now.hour
         
         # Handle overnight trading (e.g., 22:00 to 06:00)
@@ -167,7 +201,28 @@ class TradingScheduler:
         if self.is_trading_hours(now):
             return timedelta(0)
         
-        # Calculate next session start
+        weekday = now.weekday()
+        hour = now.hour
+        
+        # If it's weekend, calculate time until Sunday 22:00 UTC
+        if weekday == 5:  # Saturday
+            days_until_sunday = 1
+            next_session = now.replace(hour=22, minute=0, second=0, microsecond=0)
+            next_session += timedelta(days=days_until_sunday)
+            return next_session - now
+        
+        if weekday == 6 and hour < 22:  # Sunday before 22:00
+            next_session = now.replace(hour=22, minute=0, second=0, microsecond=0)
+            return next_session - now
+        
+        if weekday == 4 and hour >= 22:  # Friday after 22:00
+            # Next session is Sunday 22:00
+            days_until_sunday = 2
+            next_session = now.replace(hour=22, minute=0, second=0, microsecond=0)
+            next_session += timedelta(days=days_until_sunday)
+            return next_session - now
+        
+        # Regular weekday logic
         today_start = now.replace(hour=self.start_hour, minute=0, second=0, microsecond=0)
         
         if now.hour < self.start_hour:
@@ -188,6 +243,17 @@ class TradingScheduler:
         if wait_time > 0:
             logger.info(f"Waiting {wait_time:.1f} seconds until next hour boundary ({next_hour.strftime('%H:%M:%S')})")
             await asyncio.sleep(wait_time)
+    
+    def seconds_until_trading_hours(self) -> float:
+        """Get seconds until trading hours begin"""
+        if self.is_trading_hours():
+            return 0
+        return self.time_until_next_session().total_seconds()
+    
+    def calculate_cycle_interval(self) -> float:
+        """Calculate interval between trading cycles in seconds"""
+        # Use configured interval from settings
+        return self.trading_config.cycle_interval_minutes * 60.0
 
 
 class TradingOrchestrator:
@@ -204,7 +270,8 @@ class TradingOrchestrator:
         memory_service: MemoryService,
         market_service: MarketService,
         mt5_client: MT5Client,
-        trading_config: TradingSettings
+        trading_config: TradingSettings,
+        settings: Optional['Settings'] = None
     ):
         self.signal_service = signal_service
         self.trade_service = trade_service
@@ -213,9 +280,10 @@ class TradingOrchestrator:
         self.market_service = market_service
         self.mt5_client = mt5_client
         self.trading_config = trading_config
+        self.settings = settings
         
         # Initialize components
-        self.symbol_processor = SymbolProcessor(signal_service, trade_service, news_service)
+        self.symbol_processor = SymbolProcessor(signal_service, trade_service, news_service, trading_config, self)
         self.scheduler = TradingScheduler(trading_config)
         
         # System state
@@ -225,6 +293,7 @@ class TradingOrchestrator:
         self.error_count = 0
         self.max_errors = 10
         self._shutdown_requested = False  # Add this missing attribute
+        self._market_closed_logged = False  # Track if we've logged market closed message
 
         
         # Statistics
@@ -528,6 +597,55 @@ class TradingOrchestrator:
         backoff_time = min(300, 30 * (2 ** min(self.error_count - 1, 3)))
         logger.info(f"⏳ Waiting {backoff_time}s before retry...")
         await asyncio.sleep(backoff_time)
+    
+    def _should_trade_now(self) -> bool:
+        """Check if we should trade now based on trading hours"""
+        return self.scheduler.is_trading_hours()
+    
+    async def _wait_for_trading_hours(self):
+        """Wait until trading hours begin"""
+        wait_time = self.scheduler.seconds_until_trading_hours()
+        if wait_time > 0:
+            hours = int(wait_time // 3600)
+            minutes = int((wait_time % 3600) // 60)
+            
+            # Get next session start time
+            next_session = datetime.now(timezone.utc) + timedelta(seconds=wait_time)
+            
+            # Show detailed message only once
+            if not self._market_closed_logged:
+                logger.info(f"⏰ Market is closed. Will open in {hours}h {minutes}m at {next_session.strftime('%Y-%m-%d %H:%M')} UTC")
+                logger.info(f"📅 Forex market opens Sunday 22:00 UTC and closes Friday 22:00 UTC")
+                self._market_closed_logged = True
+            else:
+                # Show brief update
+                logger.debug(f"Waiting for market to open in {hours}h {minutes}m...")
+            
+            # Wait longer periods when market is closed to reduce log spam
+            if wait_time > 3600:  # More than 1 hour
+                # Check every 30 minutes when more than an hour away
+                check_interval = 1800  
+            elif wait_time > 300:  # More than 5 minutes
+                # Check every 5 minutes when less than an hour away
+                check_interval = 300
+            else:
+                # Check every minute when very close to market open
+                check_interval = 60
+                
+            await asyncio.sleep(min(wait_time, check_interval))
+        else:
+            # Market is open, reset the flag
+            self._market_closed_logged = False
+    
+    async def _wait_with_shutdown_check(self):
+        """Wait for next cycle with periodic shutdown checks"""
+        wait_time = self.scheduler.calculate_cycle_interval()
+        check_interval = 5  # Check for shutdown every 5 seconds
+        
+        elapsed = 0
+        while elapsed < wait_time and not self._shutdown_requested:
+            await asyncio.sleep(min(check_interval, wait_time - elapsed))
+            elapsed += check_interval
     
     async def _shutdown_system(self):
         """Gracefully shutdown the system"""

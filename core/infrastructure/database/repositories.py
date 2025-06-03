@@ -219,6 +219,40 @@ class TradeRepository(BaseRepository):
             
             return cursor.rowcount > 0
     
+    @handle_database_errors
+    def get_trades_by_date_range(
+        self, 
+        start_date: datetime, 
+        end_date: datetime,
+        symbol: Optional[str] = None
+    ) -> List[Trade]:
+        """
+        Get trades within a date range.
+        
+        Args:
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+            symbol: Optional symbol filter
+            
+        Returns:
+            List of Trade objects
+        """
+        with self.get_connection() as conn:
+            if symbol:
+                cursor = conn.execute("""
+                    SELECT * FROM trades 
+                    WHERE timestamp >= ? AND timestamp <= ? AND symbol = ?
+                    ORDER BY timestamp DESC
+                """, (start_date.isoformat(), end_date.isoformat(), symbol))
+            else:
+                cursor = conn.execute("""
+                    SELECT * FROM trades 
+                    WHERE timestamp >= ? AND timestamp <= ?
+                    ORDER BY timestamp DESC
+                """, (start_date.isoformat(), end_date.isoformat()))
+            
+            return [self._row_to_trade(row) for row in cursor.fetchall()]
+    
     def _row_to_trade(self, row: sqlite3.Row) -> Trade:
         """Convert database row to Trade object"""
         try:
@@ -324,6 +358,40 @@ class SignalRepository(BaseRepository):
                 ORDER BY timestamp DESC 
                 LIMIT ?
             """, (symbol, limit))
+            
+            return [dict(row) for row in cursor.fetchall()]
+    
+    @handle_database_errors
+    def get_signals_by_date_range(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        symbol: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get signals within a date range.
+        
+        Args:
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+            symbol: Optional symbol filter
+            
+        Returns:
+            List of signal dictionaries
+        """
+        with self.get_connection() as conn:
+            if symbol:
+                cursor = conn.execute("""
+                    SELECT * FROM signals 
+                    WHERE timestamp >= ? AND timestamp <= ? AND symbol = ?
+                    ORDER BY timestamp DESC
+                """, (start_date.isoformat(), end_date.isoformat(), symbol))
+            else:
+                cursor = conn.execute("""
+                    SELECT * FROM signals 
+                    WHERE timestamp >= ? AND timestamp <= ?
+                    ORDER BY timestamp DESC
+                """, (start_date.isoformat(), end_date.isoformat()))
             
             return [dict(row) for row in cursor.fetchall()]
 

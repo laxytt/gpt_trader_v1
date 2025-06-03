@@ -7,6 +7,7 @@ import logging
 import json
 import pickle
 import hashlib
+import sqlite3
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timezone
@@ -48,9 +49,14 @@ class ModelRepository(BaseRepository):
         super().__init__(db_path)
         self._ensure_table_exists()
     
+    def _create_tables(self, conn: sqlite3.Connection):
+        """Create necessary tables for this repository"""
+        # Tables are created in _ensure_table_exists
+        pass
+    
     def _ensure_table_exists(self):
         """Create model metadata table if it doesn't exist"""
-        with self._get_connection() as conn:
+        with self.get_connection() as conn:
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS model_metadata (
                     model_id TEXT PRIMARY KEY,
@@ -75,7 +81,7 @@ class ModelRepository(BaseRepository):
     
     def save_metadata(self, metadata: ModelMetadata, model_path: str):
         """Save model metadata to database"""
-        with self._get_connection() as conn:
+        with self.get_connection() as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO model_metadata 
                 (model_id, model_type, version, created_at, training_metrics,
@@ -98,7 +104,7 @@ class ModelRepository(BaseRepository):
     
     def get_active_model(self, model_type: str) -> Optional[Tuple[ModelMetadata, str]]:
         """Get the currently active model of a given type"""
-        with self._get_connection() as conn:
+        with self.get_connection() as conn:
             row = conn.execute('''
                 SELECT * FROM model_metadata 
                 WHERE model_type = ? AND is_active = TRUE
@@ -112,7 +118,7 @@ class ModelRepository(BaseRepository):
     
     def get_model_by_id(self, model_id: str) -> Optional[Tuple[ModelMetadata, str]]:
         """Get model metadata by ID"""
-        with self._get_connection() as conn:
+        with self.get_connection() as conn:
             row = conn.execute('''
                 SELECT * FROM model_metadata WHERE model_id = ?
             ''', (model_id,)).fetchone()
@@ -123,7 +129,7 @@ class ModelRepository(BaseRepository):
     
     def set_active_model(self, model_id: str, model_type: str):
         """Set a model as active (deactivating others of same type)"""
-        with self._get_connection() as conn:
+        with self.get_connection() as conn:
             # Deactivate all models of this type
             conn.execute('''
                 UPDATE model_metadata 
@@ -171,7 +177,7 @@ class ModelManagementService:
         
         logger.info(f"Model Management Service initialized - Models directory: {self.models_dir}")
     
-    @with_error_recovery
+    @with_error_recovery()
     async def save_model(
         self,
         model: Any,
@@ -188,7 +194,9 @@ class ModelManagementService:
         Returns:
             model_id: Unique identifier for the saved model
         """
-        with ErrorContext("Saving model", model_type=model_type, version=version):
+        with ErrorContext("Saving model") as ctx:
+            ctx.add_detail("model_type", model_type)
+            ctx.add_detail("version", version)
             # Generate unique model ID
             model_id = self._generate_model_id(model_type, version)
             
@@ -218,7 +226,7 @@ class ModelManagementService:
             logger.info(f"Model saved successfully - ID: {model_id}, Path: {model_path}")
             return model_id
     
-    @with_error_recovery
+    @with_error_recovery()
     async def load_model(self, model_id: str) -> Tuple[Any, ModelMetadata]:
         """
         Load a model by ID.
@@ -226,7 +234,8 @@ class ModelManagementService:
         Returns:
             Tuple of (model, metadata)
         """
-        with ErrorContext("Loading model", model_id=model_id):
+        with ErrorContext("Loading model") as ctx:
+            ctx.add_detail("model_id", model_id)
             # Check cache first
             if model_id in self._loaded_models:
                 logger.debug(f"Model {model_id} loaded from cache")
@@ -248,7 +257,7 @@ class ModelManagementService:
             logger.info(f"Model loaded successfully - ID: {model_id}")
             return model, metadata
     
-    @with_error_recovery
+    @with_error_recovery()
     async def get_active_model(self, model_type: str) -> Optional[Tuple[Any, ModelMetadata]]:
         """
         Get the currently active model for a given type.
@@ -256,7 +265,8 @@ class ModelManagementService:
         Returns:
             Tuple of (model, metadata) or None if no active model
         """
-        with ErrorContext("Getting active model", model_type=model_type):
+        with ErrorContext("Getting active model") as ctx:
+            ctx.add_detail("model_type", model_type)
             result = self.repository.get_active_model(model_type)
             if not result:
                 logger.warning(f"No active model found for type: {model_type}")
@@ -265,7 +275,7 @@ class ModelManagementService:
             metadata, _ = result
             return await self.load_model(metadata.model_id)
     
-    @with_error_recovery
+    @with_error_recovery()
     async def deploy_model(self, model_id: str) -> bool:
         """
         Deploy a model (make it active).
@@ -273,7 +283,8 @@ class ModelManagementService:
         Returns:
             True if deployment successful
         """
-        with ErrorContext("Deploying model", model_id=model_id):
+        with ErrorContext("Deploying model") as ctx:
+            ctx.add_detail("model_id", model_id)
             # Load model to validate it exists
             model, metadata = await self.load_model(model_id)
             
@@ -301,7 +312,7 @@ class ModelManagementService:
             logger.info(f"Model deployed successfully - ID: {model_id}, Type: {metadata.model_type}")
             return True
     
-    @with_error_recovery
+    @with_error_recovery()
     async def rollback_model(self, model_type: str, target_version: Optional[str] = None) -> bool:
         """
         Rollback to a previous model version.

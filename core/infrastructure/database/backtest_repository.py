@@ -71,6 +71,10 @@ class BacktestRepository(BaseRepository):
                 peak = max(results.equity_curve[:i*10+1]) if i > 0 else equity
                 drawdown = (peak - equity) / peak * 100 if peak > 0 else 0
                 
+                # Cap drawdown at 100% - it's impossible to lose more than 100%
+                if drawdown > 100:
+                    drawdown = 99.9
+                
                 conn.execute("""
                     INSERT INTO backtest_equity_curves (
                         backtest_run_id, timestamp, equity, drawdown

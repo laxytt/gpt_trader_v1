@@ -8,8 +8,15 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
-import talib
 from sklearn.preprocessing import StandardScaler
+
+# Try to import talib, but make it optional
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    TALIB_AVAILABLE = False
+    print("TA-Lib not available. Using pandas for technical indicators.")
 
 from core.domain.models import MarketData, Candle
 from core.domain.exceptions import DataError
@@ -127,60 +134,87 @@ class FeatureEngineer:
         return features
     
     def _add_technical_indicators(self, features: pd.DataFrame, data: pd.DataFrame) -> pd.DataFrame:
-        """Add technical indicators using TA-Lib"""
-        try:
-            # RSI
-            features['rsi_14'] = talib.RSI(data['close'].values, timeperiod=14)
-            features['rsi_7'] = talib.RSI(data['close'].values, timeperiod=7)
-            
-            # MACD
-            macd, signal, hist = talib.MACD(
-                data['close'].values,
-                fastperiod=12,
-                slowperiod=26,
-                signalperiod=9
-            )
-            features['macd'] = macd
-            features['macd_signal'] = signal
-            features['macd_hist'] = hist
-            
-            # Bollinger Bands
-            upper, middle, lower = talib.BBANDS(
-                data['close'].values,
-                timeperiod=20,
-                nbdevup=2,
-                nbdevdn=2
-            )
-            features['bb_upper'] = upper
-            features['bb_lower'] = lower
-            features['bb_width'] = (upper - lower) / middle
-            features['bb_position'] = (data['close'] - lower) / (upper - lower)
-            
-            # ATR
-            features['atr_14'] = talib.ATR(
-                data['high'].values,
-                data['low'].values,
-                data['close'].values,
-                timeperiod=14
-            )
-            
-            # ADX
-            features['adx_14'] = talib.ADX(
-                data['high'].values,
-                data['low'].values,
-                data['close'].values,
-                timeperiod=14
-            )
-            
-        except Exception as e:
-            # Fallback to pandas if TA-Lib not available
-            features['rsi_14'] = self._calculate_rsi(data['close'], 14)
-            features['ema_12'] = data['close'].ewm(span=12).mean()
-            features['ema_26'] = data['close'].ewm(span=26).mean()
-            features['macd'] = features['ema_12'] - features['ema_26']
-            features['atr_14'] = self._calculate_atr(data, 14)
+        """Add technical indicators using TA-Lib or pandas fallbacks"""
+        if TALIB_AVAILABLE:
+            try:
+                # RSI
+                features['rsi_14'] = talib.RSI(data['close'].values, timeperiod=14)
+                features['rsi_7'] = talib.RSI(data['close'].values, timeperiod=7)
+                
+                # MACD
+                macd, signal, hist = talib.MACD(
+                    data['close'].values,
+                    fastperiod=12,
+                    slowperiod=26,
+                    signalperiod=9
+                )
+                features['macd'] = macd
+                features['macd_signal'] = signal
+                features['macd_hist'] = hist
+                
+                # Bollinger Bands
+                upper, middle, lower = talib.BBANDS(
+                    data['close'].values,
+                    timeperiod=20,
+                    nbdevup=2,
+                    nbdevdn=2
+                )
+                features['bb_upper'] = upper
+                features['bb_lower'] = lower
+                features['bb_width'] = (upper - lower) / middle
+                features['bb_position'] = (data['close'] - lower) / (upper - lower)
+                
+                # ATR
+                features['atr_14'] = talib.ATR(
+                    data['high'].values,
+                    data['low'].values,
+                    data['close'].values,
+                    timeperiod=14
+                )
+                
+                # ADX
+                features['adx_14'] = talib.ADX(
+                    data['high'].values,
+                    data['low'].values,
+                    data['close'].values,
+                    timeperiod=14
+                )
+                
+            except Exception as e:
+                # If talib fails, use pandas fallback
+                self._add_pandas_indicators(features, data)
+        else:
+            # Use pandas implementation
+            self._add_pandas_indicators(features, data)
         
         return features
+    
+    def _add_pandas_indicators(self, features: pd.DataFrame, data: pd.DataFrame):
+        """Add technical indicators using pandas (fallback when TA-Lib not available)"""
+        # RSI
+        features['rsi_14'] = self._calculate_rsi(data['close'], 14)
+        features['rsi_7'] = self._calculate_rsi(data['close'], 7)
+        
+        # MACD
+        ema_12 = data['close'].ewm(span=12).mean()
+        ema_26 = data['close'].ewm(span=26).mean()
+        features['macd'] = ema_12 - ema_26
+        features['macd_signal'] = features['macd'].ewm(span=9).mean()
+        features['macd_hist'] = features['macd'] - features['macd_signal']
+        
+        # Bollinger Bands
+        sma_20 = data['close'].rolling(20).mean()
+        std_20 = data['close'].rolling(20).std()
+        features['bb_upper'] = sma_20 + (2 * std_20)
+        features['bb_lower'] = sma_20 - (2 * std_20)
+        features['bb_width'] = (features['bb_upper'] - features['bb_lower']) / sma_20
+        features['bb_position'] = (data['close'] - features['bb_lower']) / (features['bb_upper'] - features['bb_lower'])
+        
+        # ATR
+        features['atr_14'] = self._calculate_atr(data, 14)
+        
+        # ADX (simplified)
+        features['adx_14'] = self._calculate_adx(data, 14)
     
     def _add_microstructure_features(self, features: pd.DataFrame, data: pd.DataFrame) -> pd.DataFrame:
         """Add market microstructure features"""
@@ -291,7 +325,7 @@ class FeatureEngineer:
                       future_return > 0.002):
                     labels.iloc[i] = 1
                 
-                # Upthrust Pattern (Bearish)
+                
                 elif (high > data['high'].iloc[i-10:i].max() and  # New high
                       close < open_price and  # But closed down
                       volume > avg_volume.iloc[i] and
@@ -327,6 +361,28 @@ class FeatureEngineer:
         true_range = ranges.max(axis=1)
         atr = true_range.rolling(period).mean()
         return atr
+    
+    def _calculate_adx(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Calculate ADX (simplified version) without TA-Lib"""
+        # Calculate directional movement
+        high_diff = data['high'] - data['high'].shift(1)
+        low_diff = data['low'].shift(1) - data['low']
+        
+        plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+        minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+        
+        # Get ATR
+        atr = self._calculate_atr(data, period)
+        
+        # Calculate directional indicators
+        plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / atr
+        minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / atr
+        
+        # Calculate ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(period).mean()
+        
+        return adx
     
     def transform_features(self, features: pd.DataFrame) -> pd.DataFrame:
         """Apply feature transformations (scaling, etc.)"""

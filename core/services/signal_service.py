@@ -412,7 +412,7 @@ class SignalService:
         try:
             validation_result = await self.offline_validator.validate_market_data(
                 market_data,
-                min_score_threshold=0.5  # Configurable threshold
+                min_score_threshold=self.trading_config.offline_validation_threshold
             )
             
             # Log validation summary
@@ -634,9 +634,52 @@ class SignalService:
         
         return results
     
-    async def _load_ml_model(self):
+    async def _load_ml_model(self, symbol: Optional[str] = None):
         """Load the active ML model for signal generation"""
         try:
+            # Try to load symbol-specific model first
+            if symbol:
+                model_type = f"pattern_trader_{symbol}"
+                result = await self.model_management_service.get_active_model(model_type)
+                if result:
+                    self._ml_model, self._ml_metadata = result
+                    logger.info(f"ML model loaded for {symbol}: {self._ml_metadata.model_id}")
+                    return
+                
+                # Try direct pickle file loading as fallback
+                pickle_paths = [
+                    Path(f"models/{symbol}_ml_package_20250602_235335.pkl"),
+                    Path(f"models/{symbol}_ml_package_20250602_235803.pkl"),
+                    Path(f"models/{symbol}_ml_package_20250603_000234.pkl"),
+                    Path(f"models/{symbol}_ml_package_20250603_000706.pkl"),
+                ]
+                
+                for pickle_path in pickle_paths:
+                    if pickle_path.exists():
+                        logger.info(f"Found ML model at {pickle_path}")
+                        try:
+                            # Try to load the pickle file
+                            import pickle
+                            with open(pickle_path, 'rb') as f:
+                                ml_package = pickle.load(f)
+                            
+                            # Extract model and metadata
+                            # The model is stored as 'pipeline' in the package
+                            self._ml_model = ml_package.get('pipeline')
+                            self._ml_metadata = type('obj', (object,), {
+                                'model_id': pickle_path.stem,
+                                'model_type': model_type,
+                                'file_path': str(pickle_path),
+                                'feature_names': ml_package.get('feature_names', [])
+                            })
+                            logger.info(f"Successfully loaded ML model for {symbol}")
+                            return
+                        except Exception as e:
+                            logger.error(f"Failed to load ML model from {pickle_path}: {e}")
+                            # Continue to try next file
+                            continue
+            
+            # Fallback to generic signal classifier
             result = await self.model_management_service.get_active_model('signal_classifier')
             if result:
                 self._ml_model, self._ml_metadata = result
@@ -653,6 +696,13 @@ class SignalService:
         """
         with ErrorContext("ML signal generation", symbol=symbol) as ctx:
             try:
+                # Load symbol-specific ML model if not already loaded
+                await self._load_ml_model(symbol)
+                
+                if not self._ml_model:
+                    logger.warning(f"No ML model available for {symbol}, falling back to GPT")
+                    return await self.generate_signal(symbol)
+                
                 # Step 1: Gather market data
                 ctx.add_detail("step", "data_gathering")
                 market_data = await self._gather_market_data(symbol)
@@ -701,7 +751,7 @@ class SignalService:
         h4_df = self._market_data_to_dataframe(h4_data)
         
         # Engineer features
-        features_df = self.feature_engineer.engineer_features(h1_df)
+        features_df = self.feature_engineer.prepare_features(h1_df)
         
         # Add H4 context features
         h4_features = self._extract_h4_context_features(h4_df)

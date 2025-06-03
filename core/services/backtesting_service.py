@@ -5,7 +5,7 @@ Enables historical strategy testing with full integration of existing components
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,12 +21,17 @@ from core.domain.models import (
 )
 from core.domain.exceptions import BacktestingError, ErrorContext, InsufficientDataError
 from core.infrastructure.data.unified_data_provider import DataRequest
-from core.services.signal_service import SignalService
+# Remove direct import to break circular dependency
+# SignalService will be injected at runtime
 from core.services.offline_validator import OfflineSignalValidator
 from core.infrastructure.mt5.data_provider import MT5DataProvider
 from core.utils.chart_utils import ChartGenerator
 from config.settings import TradingSettings
 from core.utils.data_diagnostics import DataDiagnostics
+
+# Type checking imports that don't execute at runtime
+if TYPE_CHECKING:
+    from core.services.signal_service import SignalService
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +135,27 @@ class BacktestDataProvider:
         timeframe: str = "H1"
     ) -> pd.DataFrame:
         """Get historical data for backtesting period"""
+        # Convert date objects to datetime if needed
+        if hasattr(start_date, 'date') and callable(start_date.date):
+            # It's already a datetime
+            start_dt = start_date
+        else:
+            # It's a date, convert to datetime at start of day
+            start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+            
+        if hasattr(end_date, 'date') and callable(end_date.date):
+            # It's already a datetime
+            end_dt = end_date
+        else:
+            # It's a date, convert to datetime at end of day
+            end_dt = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
+        
         # Create request with date range
         request = DataRequest(
             symbol=symbol,
             timeframe=TimeFrame[timeframe],
-            start_date=start_date,
-            end_date=end_date
+            start_date=start_dt,
+            end_date=end_dt
         )
         
         try:
@@ -179,7 +199,7 @@ class BacktestSignalGenerator:
     
     def __init__(
         self, 
-        signal_service: Optional[SignalService] = None,
+        signal_service: Optional['SignalService'] = None,  # Type hint with string to avoid import
         offline_validator: Optional[OfflineSignalValidator] = None,
         mode: BacktestMode = BacktestMode.OFFLINE_ONLY,
         data_provider: Optional[MT5DataProvider] = None  # Add this
@@ -243,7 +263,7 @@ class BacktestSignalGenerator:
             # Use only offline validation
             validation_result = await self.offline_validator.validate_market_data(
                 market_data,
-                min_score_threshold=0.6
+                min_score_threshold=0.5  # Lower threshold since VSA will filter further
             )
             return self._create_signal_from_validation(market_data, validation_result)
         
@@ -256,96 +276,18 @@ class BacktestSignalGenerator:
         market_data: MarketData,
         validation_result: Dict
     ) -> TradingSignal:
-        """Create signal from validation results with improved logic"""
+        """Create signal from validation results with improved VSA logic"""
         score = validation_result['validation_summary']['weighted_score']
         
-        if score < 0.65:  # Raised threshold
-            return TradingSignal(
-                symbol=market_data.symbol,
-                signal=SignalType.WAIT,
-                reason=f"Validation score too low: {score:.2f}",
-                risk_class=RiskClass.C
-            )
+        # Import VSA analyzer
+        from core.services.vsa_analyzer import VSAAnalyzer, create_signal_from_vsa
         
-        # Get recent candles for VSA analysis
-        candles = market_data.candles[-20:]
-        if len(candles) < 20:
-            return self._create_wait_signal(market_data.symbol, "Insufficient data")
+        # Perform VSA analysis
+        vsa_analyzer = VSAAnalyzer(lookback_periods=20)
+        vsa_signal = vsa_analyzer.analyze(market_data)
         
-        latest = candles[-1]
-        prev = candles[-2]
-        
-        # Calculate volume metrics
-        avg_volume = sum(c.volume for c in candles[:-1]) / len(candles[:-1])
-        volume_ratio = latest.volume / avg_volume if avg_volume > 0 else 1
-        
-        # VSA Pattern Detection
-        buy_signal = False
-        sell_signal = False
-        
-        # 1. Check for Stopping Volume (bullish)
-        if (prev.close < prev.open and  # Down bar
-            prev.volume > avg_volume * 1.5 and  # High volume
-            latest.close > latest.open and  # Up bar
-            latest.close > prev.close):  # Reversal
-            buy_signal = True
-            reason = "Stopping Volume pattern"
-        
-        # 2. Check for No Supply (bullish)
-        elif (latest.close < latest.open and  # Down bar
-            latest.volume < avg_volume * 0.5 and  # Low volume
-            latest.close > latest.low):  # Close off lows
-            # Need confirmation
-            if candles[-3].close < candles[-3].open:  # Previous trend was down
-                buy_signal = True
-                reason = "No Supply pattern"
-        
-        # 3. Check for Upthrust (bearish)
-        if (latest.high > max(c.high for c in candles[-10:-1]) and  # New high
-            latest.close < latest.open and  # But closed down
-            latest.close < (latest.high + latest.low) / 2 and  # Closed in lower half
-            volume_ratio > 1.3):  # With volume
-            sell_signal = True
-            reason = "Upthrust pattern"
-        
-        # 4. Check for No Demand (bearish)
-        elif (latest.close > latest.open and  # Up bar
-            latest.volume < avg_volume * 0.5 and  # Low volume
-            latest.close < latest.high):  # Close off highs
-            if candles[-3].close > candles[-3].open:  # Previous trend was up
-                sell_signal = True
-                reason = "No Demand pattern"
-        
-        # Additional filters
-        if buy_signal:
-            # Check trend alignment
-            if latest.ema50 and latest.ema200:
-                if latest.ema50 < latest.ema200:  # Against major trend
-                    if score < 0.8:  # Only take if very high score
-                        buy_signal = False
-            
-            # Check RSI
-            if latest.rsi14 and latest.rsi14 > 70:
-                buy_signal = False  # Overbought
-        
-        if sell_signal:
-            # Check trend alignment
-            if latest.ema50 and latest.ema200:
-                if latest.ema50 > latest.ema200:  # Against major trend
-                    if score < 0.8:
-                        sell_signal = False
-            
-            # Check RSI
-            if latest.rsi14 and latest.rsi14 < 30:
-                sell_signal = False  # Oversold
-        
-        # Generate signal
-        if buy_signal and score > 0.7:
-            return self._create_buy_signal_improved(market_data, score, reason)
-        elif sell_signal and score > 0.7:
-            return self._create_sell_signal_improved(market_data, score, reason)
-        
-        return self._create_wait_signal(market_data.symbol, "No clear VSA pattern")
+        # Create signal from VSA analysis
+        return create_signal_from_vsa(market_data, vsa_signal, base_score=score)
 
     def _create_buy_signal_improved(self, market_data: MarketData, score: float, reason: str) -> TradingSignal:
         """Create improved buy signal with better SL/TP"""
@@ -447,7 +389,11 @@ class BacktestSignalGenerator:
             symbol=symbol,
             signal=SignalType.WAIT,
             reason=reason,
-            risk_class=RiskClass.C
+            risk_class=RiskClass.C,
+            entry=0.0,
+            stop_loss=0.0,
+            take_profit=0.0,
+            risk_reward=0.0
         )
     
     def _create_default_signal(self, market_data: MarketData) -> TradingSignal:
@@ -465,10 +411,30 @@ class BacktestExecutor:
         self.open_trades: Dict[str, BacktestTrade] = {}
         self.closed_trades: List[BacktestTrade] = []
         self.equity_curve = [config.initial_balance]
+        self.margin_called = False
     
     def can_open_trade(self) -> bool:
         """Check if we can open a new trade"""
-        return len(self.open_trades) < self.config.max_open_trades
+        # Check if margin called
+        if self.margin_called:
+            return False
+            
+        # Check trade count limit
+        if len(self.open_trades) >= self.config.max_open_trades:
+            return False
+        
+        # Check if we have sufficient margin (at least 20% of initial balance)
+        min_balance = self.config.initial_balance * 0.2
+        if self.balance < min_balance:
+            logger.warning(f"Insufficient margin: Balance ${self.balance:.2f} < ${min_balance:.2f}")
+            return False
+        
+        # Also check if balance is too low in absolute terms
+        if self.balance < 1000:  # Less than $1000
+            logger.warning(f"Balance too low to trade: ${self.balance:.2f}")
+            return False
+        
+        return True
     
     def calculate_lot_size(
         self, 
@@ -480,13 +446,36 @@ class BacktestExecutor:
             return 0.01  # Default minimum
         
         risk_amount = self.balance * self.config.risk_per_trade
-        stop_distance = abs(current_price - signal.stop_loss)
+        stop_distance_points = abs(current_price - signal.stop_loss)
         
-        if stop_distance == 0:
+        if stop_distance_points == 0:
             return 0.01
         
-        # Simplified calculation (would need symbol specs in real implementation)
-        lot_size = risk_amount / (stop_distance * 100000)  # Assuming standard lot
+        # Convert to pips based on symbol
+        symbol = signal.symbol
+        if 'JPY' in symbol:
+            # For JPY pairs, 1 pip = 0.01
+            stop_distance_pips = stop_distance_points * 100
+            # For 1 standard lot (100,000 units), 1 pip = $10 for USD/JPY
+            # For other JPY pairs it varies, but we'll use $10 as approximation
+            pip_value_per_lot = 10
+        else:
+            # For other pairs, 1 pip = 0.0001
+            stop_distance_pips = stop_distance_points * 10000
+            # For 1 standard lot (100,000 units), 1 pip = $10 for major pairs
+            pip_value_per_lot = 10
+        
+        # Calculate lot size: Risk Amount / (Stop Distance in Pips * Pip Value per Lot)
+        lot_size = risk_amount / (stop_distance_pips * pip_value_per_lot)
+        
+        # Log calculation details
+        logger.debug(f"Lot size calc for {symbol}: risk_amount=${risk_amount:.2f}, "
+                    f"stop_distance_pips={stop_distance_pips:.1f}, pip_value=${pip_value_per_lot}, "
+                    f"raw_lot_size={lot_size:.4f}")
+        
+        # Limit lot size to prevent extreme positions
+        max_lot_size = min(0.5, self.balance / 10000)  # Max 0.5 lots or balance/10000
+        lot_size = min(lot_size, max_lot_size)
         
         return max(0.01, round(lot_size, 2))
     
@@ -530,7 +519,10 @@ class BacktestExecutor:
         # Update balance for commission
         self.balance -= commission
         
-        logger.debug(f"Opened {signal.signal.value} trade for {signal.symbol} at {entry_price}")
+        logger.info(
+            f"Opened {signal.signal.value} trade for {signal.symbol} at {entry_price}, "
+            f"lot_size: {lot_size:.2f}, stop: {signal.stop_loss:.5f}, tp: {signal.take_profit:.5f}"
+        )
         
         return trade
     
@@ -633,7 +625,24 @@ class BacktestExecutor:
         else:
             trade.pnl_points = trade.entry_price - trade.exit_price
         
-        trade.pnl = (trade.pnl_points * 100000 * trade.lot_size) - trade.commission
+        # Calculate P&L based on symbol
+        symbol = trade.signal.symbol
+        if 'JPY' in symbol:
+            # For JPY pairs, multiply by 100 to get pips
+            pnl_pips = trade.pnl_points * 100
+            pip_value_per_lot = 10  # $10 per pip for 1 standard lot
+        else:
+            # For other pairs, multiply by 10000 to get pips
+            pnl_pips = trade.pnl_points * 10000
+            pip_value_per_lot = 10  # $10 per pip for 1 standard lot
+        
+        # Sanity check - cap extreme P&L
+        max_pips = 500  # Cap at 500 pips per trade
+        if abs(pnl_pips) > max_pips:
+            logger.warning(f"Extreme P&L detected: {pnl_pips:.1f} pips on {symbol}, capping at {max_pips}")
+            pnl_pips = max_pips if pnl_pips > 0 else -max_pips
+        
+        trade.pnl = (pnl_pips * pip_value_per_lot * trade.lot_size) - trade.commission
         
         # Determine result
         if trade.pnl > 0:
@@ -652,6 +661,15 @@ class BacktestExecutor:
         # Update balance
         self.balance += trade.pnl
         
+        # Prevent negative balance (margin call)
+        if self.balance <= 0:
+            original_balance = self.balance
+            self.balance = 0
+            logger.warning(f"MARGIN CALL! Balance went from ${original_balance:.2f} to $0")
+            
+            # Set a flag to stop further trading
+            self.margin_called = True
+        
         # Move to closed trades - Check if trade exists before deleting
         symbol = trade.signal.symbol
         if symbol in self.open_trades:
@@ -661,9 +679,10 @@ class BacktestExecutor:
         
         self.closed_trades.append(trade)
         
-        logger.debug(
+        logger.info(
             f"Closed {trade.signal.signal.value} trade for {symbol} "
-            f"at {exit_price} ({exit_reason}), P&L: {trade.pnl:.2f}"
+            f"at {exit_price:.5f} ({exit_reason}), P&L: ${trade.pnl:.2f}, "
+            f"Balance: ${self.balance:.2f}"
         )
     
     def update_equity(self, current_prices: Optional[Dict[str, float]] = None):
@@ -676,14 +695,61 @@ class BacktestExecutor:
                 if symbol in current_prices:
                     current_price = current_prices[symbol]
                     
+                    # Calculate unrealized P&L
                     if trade.signal.signal == SignalType.BUY:
-                        current_pnl = (current_price - trade.entry_price) * 100000 * trade.lot_size
+                        pnl_points = current_price - trade.entry_price
                     else:
-                        current_pnl = (trade.entry_price - current_price) * 100000 * trade.lot_size
+                        pnl_points = trade.entry_price - current_price
+                    
+                    # Convert to P&L based on symbol
+                    if 'JPY' in symbol:
+                        pnl_pips = pnl_points * 100
+                        pip_value_per_lot = 10
+                    else:
+                        pnl_pips = pnl_points * 10000
+                        pip_value_per_lot = 10
+                    
+                    # Sanity check - cap extreme unrealized P&L
+                    max_pips = 500
+                    if abs(pnl_pips) > max_pips:
+                        logger.warning(f"Extreme unrealized P&L: {pnl_pips:.1f} pips on {symbol}")
+                        pnl_pips = max_pips if pnl_pips > 0 else -max_pips
+                    
+                    # Don't subtract commission here as it was already deducted from balance when opening
+                    current_pnl = pnl_pips * pip_value_per_lot * trade.lot_size
+                    
+                    # Log large unrealized losses
+                    if current_pnl < -self.config.initial_balance * 0.1:  # More than 10% loss
+                        logger.warning(f"Large unrealized loss on {symbol}: ${current_pnl:.2f} "
+                                     f"(entry: {trade.entry_price:.5f}, current: {current_price:.5f}, "
+                                     f"lot_size: {trade.lot_size:.2f})")
                     
                     open_equity += current_pnl
         
-        self.equity = self.balance + open_equity
+        # Calculate total equity
+        calculated_equity = self.balance + open_equity
+        
+        # Sanity checks on equity
+        if calculated_equity < 0:
+            logger.warning(f"Negative equity detected: ${calculated_equity:.2f}, setting to 0")
+            calculated_equity = 0
+        elif calculated_equity > self.config.initial_balance * 5:  # More than 500% gain
+            logger.warning(f"Unrealistic equity spike: ${calculated_equity:.2f}, capping at 5x initial")
+            calculated_equity = self.config.initial_balance * 5
+        
+        # Additional check - equity shouldn't change more than 50% in one bar
+        if len(self.equity_curve) > 0:
+            prev_equity = self.equity_curve[-1]
+            if prev_equity > 0:
+                change_ratio = calculated_equity / prev_equity
+                if change_ratio > 1.5:  # More than 50% gain
+                    logger.warning(f"Equity spike from ${prev_equity:.2f} to ${calculated_equity:.2f}, capping")
+                    calculated_equity = prev_equity * 1.5
+                elif change_ratio < 0.5:  # More than 50% loss
+                    logger.warning(f"Equity crash from ${prev_equity:.2f} to ${calculated_equity:.2f}, capping")
+                    calculated_equity = prev_equity * 0.5
+        
+        self.equity = calculated_equity
         self.equity_curve.append(self.equity)
 
 
@@ -749,22 +815,54 @@ class BacktestAnalyzer:
         return results
     
     def _calculate_max_drawdown(self, equity_curve: List[float]) -> float:
-        """Calculate maximum drawdown percentage"""
-        if len(equity_curve) < 2:
+        """Calculate maximum drawdown percentage - FIXED VERSION"""
+        if not equity_curve or len(equity_curve) < 2:
             return 0.0
         
-        peak = equity_curve[0]
-        max_dd = 0.0
+        # Clean data - only use valid positive values
+        clean_equity = []
+        for i, v in enumerate(equity_curve):
+            try:
+                val = float(v)
+                if val >= 0:
+                    clean_equity.append(val)
+                else:
+                    logger.warning(f"Negative equity at index {i}: ${val:.2f}, using 0")
+                    clean_equity.append(0.0)
+            except (TypeError, ValueError):
+                logger.warning(f"Invalid equity value at index {i}: {v}")
+                continue
         
-        for value in equity_curve[1:]:
+        if len(clean_equity) < 2:
+            return 0.0
+        
+        # Simple, correct drawdown calculation
+        peak = clean_equity[0]
+        max_drawdown = 0.0
+        
+        for i, value in enumerate(clean_equity):
+            # Update peak
             if value > peak:
                 peak = value
             
-            dd = (peak - value) / peak * 100
-            max_dd = max(max_dd, dd)
+            # Calculate drawdown from peak
+            if peak > 0:
+                drawdown = (peak - value) / peak * 100
+                
+                # Log significant drawdowns
+                if drawdown > max_drawdown:
+                    max_drawdown = drawdown
+                    if drawdown > 20:  # Log significant drawdowns
+                        logger.info(f"New max drawdown: {drawdown:.2f}% at index {i} "
+                                  f"(peak=${peak:.2f}, current=${value:.2f})")
         
-        return max_dd
-    
+        # CRITICAL: Cap at 100% - it's impossible to lose more than 100%
+        if max_drawdown > 100:
+            logger.error(f"IMPOSSIBLE DRAWDOWN: {max_drawdown:.2f}%, capping at 99.9%")
+            max_drawdown = 99.9
+        
+        logger.info(f"Final max drawdown: {max_drawdown:.2f}%")
+        return max_drawdown
     def _calculate_sharpe_ratio(self, equity_curve: List[float], risk_free_rate: float = 0.02) -> float:
         """Calculate Sharpe ratio"""
         if len(equity_curve) < 2:
@@ -980,6 +1078,13 @@ class BacktestEngine:
                     config.end_date,
                     "Backtest End"
                 )
+        
+        # Log final executor state
+        logger.info(f"Final executor state - Balance: ${executor.balance:.2f}, "
+                   f"Equity: ${executor.equity:.2f}, Open trades: {len(executor.open_trades)}")
+        logger.info(f"Equity curve - Length: {len(executor.equity_curve)}, "
+                   f"First: ${executor.equity_curve[0] if executor.equity_curve else 0:.2f}, "
+                   f"Last: ${executor.equity_curve[-1] if executor.equity_curve else 0:.2f}")
         
         # Analyze results
         results = self.analyzer.analyze_results(

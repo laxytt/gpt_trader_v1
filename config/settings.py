@@ -8,6 +8,10 @@ from typing import List, Dict, Optional
 from pydantic import Field, field_validator, ConfigDict
 from pydantic_settings import BaseSettings
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import symbol configurations
 from .symbols import get_symbols_by_group, get_all_supported_symbols
@@ -45,8 +49,10 @@ class TradingSettings(BaseSettings):
     end_hour: int = Field(23, ge=0, le=23, description="Trading end hour (UTC)")
     risk_per_trade_percent: float = Field(1.5, gt=0, le=10, description="Risk per trade as percentage")
     max_open_trades: int = Field(3, gt=0, description="Maximum concurrent open trades")
-    bars_for_analysis: int = Field(80, gt=0, description="Number of bars for chart analysis")
+    bars_for_analysis: int = Field(100, gt=0, description="Number of bars for chart analysis")
     bars_for_json: int = Field(20, gt=0, description="Number of bars for JSON data")
+    cycle_interval_minutes: int = Field(15, gt=0, description="Minutes between trading cycles")
+    offline_validation_threshold: float = Field(0.7, ge=0.0, le=1.0, description="Minimum validation score to proceed with GPT call")
     
     @field_validator('end_hour')
     @classmethod
@@ -101,6 +107,22 @@ class TelegramSettings(BaseSettings):
         return v
 
 
+class MLSettings(BaseSettings):
+    """Machine Learning configuration"""
+    model_config = ConfigDict(env_prefix="ML_", extra="ignore", protected_namespaces=())
+    
+    enabled: bool = Field(False, description="Enable ML-based signal generation")
+    confidence_threshold: float = Field(0.7, ge=0.0, le=1.0, description="Minimum confidence for ML signals")
+    fallback_to_gpt: bool = Field(True, description="Use GPT when ML confidence is low")
+    update_frequency_days: int = Field(30, gt=0, description="Days between model retraining")
+    min_training_samples: int = Field(1000, gt=0, description="Minimum samples required for training")
+    feature_lookback_periods: List[int] = Field(
+        default=[5, 10, 20, 50], 
+        description="Lookback periods for feature engineering"
+    )
+    use_ensemble: bool = Field(False, description="Use ensemble of models instead of single model")
+
+
 class PathSettings(BaseSettings):
     """File and directory paths"""
     base_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent)
@@ -132,6 +154,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     news: NewsSettings = Field(default_factory=NewsSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
+    ml: MLSettings = Field(default_factory=MLSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     
     # Global settings
@@ -174,6 +197,7 @@ __all__ = [
     'DatabaseSettings',
     'NewsSettings',
     'TelegramSettings',
+    'MLSettings',
     'PathSettings',
     'get_settings'
 ]

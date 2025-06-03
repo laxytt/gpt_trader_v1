@@ -210,7 +210,8 @@ class DependencyContainer:
                 memory_service=self.memory_service(),
                 market_service=self.market_service(),
                 mt5_client=self.mt5_client(),
-                trading_config=self.settings.trading
+                trading_config=self.settings.trading,
+                settings=self.settings
             ))
 
 

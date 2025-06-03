@@ -3,6 +3,7 @@
 Model evaluation utilities for trading strategies.
 Provides comprehensive metrics for model performance assessment.
 """
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
@@ -15,8 +16,6 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
-
-from core.services.backtesting_service import BacktestResults
 
 
 class ModelEvaluator:
@@ -45,7 +44,7 @@ class ModelEvaluator:
         y_true: np.ndarray,
         y_pred: np.ndarray,
         y_prob: Optional[np.ndarray] = None,
-        backtest_results: Optional[BacktestResults] = None
+        backtest_results: Optional['BacktestResults'] = None
     ) -> Dict[str, Any]:
         """
         Comprehensive model evaluation combining ML and trading metrics.
@@ -107,7 +106,7 @@ class ModelEvaluator:
         
         return metrics
     
-    def _calculate_trading_metrics(self, backtest_results: BacktestResults) -> Dict[str, float]:
+    def _calculate_trading_metrics(self, backtest_results: 'BacktestResults') -> Dict[str, float]:
         """Calculate trading-specific metrics"""
         if not backtest_results or backtest_results.total_trades < self.config['min_trades']:
             return {'error': 'Insufficient trades for evaluation'}
@@ -222,14 +221,14 @@ class ModelEvaluator:
         annualized = (1 + total_return / 100) ** (1 / years) - 1
         return annualized * 100
     
-    def _calculate_risk_adjusted_return(self, results: BacktestResults) -> float:
+    def _calculate_risk_adjusted_return(self, results: 'BacktestResults') -> float:
         """Calculate risk-adjusted return (return per unit of risk)"""
         if results.max_drawdown == 0:
             return 0.0
         
         return results.total_return / results.max_drawdown
     
-    def _calculate_information_ratio(self, results: BacktestResults) -> float:
+    def _calculate_information_ratio(self, results: 'BacktestResults') -> float:
         """Calculate information ratio"""
         if not results.daily_returns:
             return 0.0
@@ -247,7 +246,7 @@ class ModelEvaluator:
         
         return np.sqrt(252) * np.mean(excess_returns) / tracking_error
     
-    def _calculate_omega_ratio(self, results: BacktestResults, threshold: float = 0.0) -> float:
+    def _calculate_omega_ratio(self, results: 'BacktestResults', threshold: float = 0.0) -> float:
         """Calculate Omega ratio"""
         if not results.daily_returns:
             return 0.0
@@ -263,7 +262,7 @@ class ModelEvaluator:
         
         return np.sum(gains) / np.sum(losses)
     
-    def _calculate_confidence_intervals(self, results: BacktestResults) -> Dict[str, Tuple[float, float]]:
+    def _calculate_confidence_intervals(self, results: 'BacktestResults') -> Dict[str, Tuple[float, float]]:
         """Calculate confidence intervals for key metrics"""
         if results.total_trades < self.config['min_trades']:
             return {}

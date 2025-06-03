@@ -14,6 +14,12 @@ python trading_loop.py
 
 # Run backtesting
 python run_backtest.py
+
+# Train ML models
+python scripts/train_ml_models.py
+
+# Test ML performance
+python scripts/test_ml_backtest.py
 ```
 
 ### Dependency Management
@@ -35,6 +41,8 @@ OPENAI_API_KEY=your-key
 MT5_FILES_DIR=C:/.../MetaQuotes/.../MQL5/Files
 TELEGRAM_TOKEN=your-token (optional)
 TELEGRAM_CHAT_ID=your-chat-id (optional)
+ML_ENABLED=false (set to true to enable ML)
+ML_CONFIDENCE_THRESHOLD=0.7
 ```
 
 ## High-Level Architecture

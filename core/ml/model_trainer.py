@@ -182,16 +182,38 @@ class TradingModelPipeline:
     
     async def _save_model(self, symbol: str, model: Any):
         """Save trained model using ModelManagementService"""
-        # This method needs to be integrated with ModelManagementService
-        # For now, we'll use joblib directly
         from pathlib import Path
+        from core.services.model_management_service import ModelManagementService, ModelRepository
         
-        models_dir = Path("models")
-        models_dir.mkdir(exist_ok=True)
+        # Initialize model management
+        model_repository = ModelRepository(str(Path("data/trades.db")))
+        model_management = ModelManagementService(
+            models_dir=Path("models"),
+            model_repository=model_repository
+        )
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{symbol}_model_{timestamp}.pkl"
-        filepath = models_dir / filename
+        # Save model with metadata
+        model_id = await model_management.save_model(
+            model=model,
+            model_type=f"signal_predictor_{symbol}",
+            version="1.0.0",
+            training_metrics={
+                'accuracy': 0.0,  # These would come from evaluation
+                'f1_score': 0.0,
+                'precision': 0.0,
+                'recall': 0.0
+            },
+            feature_names=self.feature_engineer.feature_names,
+            hyperparameters={
+                'n_estimators': 100,
+                'max_depth': 10,
+                'random_state': 42
+            },
+            training_data_info={
+                'symbol': symbol,
+                'trained_at': datetime.now().isoformat()
+            }
+        )
         
-        joblib.dump(model, filepath)
-        logger.info(f"Model saved to {filepath}")
+        logger.info(f"Model saved for {symbol} with ID: {model_id}")
+        return model_id

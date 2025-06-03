@@ -223,9 +223,13 @@ class ChartGenerator:
         """Create additional plots for indicators"""
         additional_plots = []
         
+        # Get the valid index from the main dataframe (after cleaning)
+        valid_index = df.dropna(subset=['open', 'high', 'low', 'close']).index
+        
         # Add EMAs to main panel (panel 0)
         if 'ema50' in df.columns:
-            ema50_data = df['ema50'].dropna()
+            # Align EMA data with valid index
+            ema50_data = df.loc[valid_index, 'ema50'].dropna()
             if not ema50_data.empty and len(ema50_data) > 0:
                 additional_plots.append(
                     mpf.make_addplot(
@@ -237,7 +241,8 @@ class ChartGenerator:
                 )
         
         if 'ema200' in df.columns:
-            ema200_data = df['ema200'].dropna()
+            # Align EMA data with valid index
+            ema200_data = df.loc[valid_index, 'ema200'].dropna()
             if not ema200_data.empty and len(ema200_data) > 0:
                 additional_plots.append(
                     mpf.make_addplot(
@@ -250,7 +255,8 @@ class ChartGenerator:
         
         # Only add RSI if requested AND data exists
         if include_rsi and 'rsi14' in df.columns:
-            rsi_data = df['rsi14'].dropna()
+            # Align RSI data with valid index
+            rsi_data = df.loc[valid_index, 'rsi14'].dropna()
             if not rsi_data.empty and len(rsi_data) > 10:  # Need at least 10 points for RSI
                 # Determine RSI panel number based on volume setting
                 volume_enabled = self.default_style.get('volume', True)

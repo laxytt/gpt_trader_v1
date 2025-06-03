@@ -1,0 +1,53 @@
+================================================================================
+BACKTEST RESULTS SUMMARY
+================================================================================
+
+Configuration:
+  Period: 2025-05-03 to 2025-06-02
+  Symbols: EURUSD, GBPUSD, USDJPY, AUDUSD
+  Initial Balance: $10,000.00
+  Risk per Trade: 1.0%
+  Mode: full
+
+Performance Summary:
+  Total Trades: 72
+  Winning Trades: 19
+  Losing Trades: 53
+  Win Rate: 26.4%
+  Total P&L: $284.22
+  Total Return: 2.84%
+  Final Balance: $10,145.75
+
+Risk Metrics:
+  Max Drawdown: 8.53%
+  Sharpe Ratio: -0.16
+  Sortino Ratio: -0.25
+  Calmar Ratio: 0.33
+
+Trade Statistics:
+  Average Win: $108.68
+  Average Loss: $-33.60
+  Profit Factor: 1.16
+  Expectancy: $3.95
+  Avg Bars Held: 8.5
+  Avg RR Achieved: 1.08
+
+Performance by Symbol:
+  GBPUSD:
+    Trades: 14
+    Win Rate: 42.9%
+    P&L: $48.35
+  EURUSD:
+    Trades: 19
+    Win Rate: 52.6%
+    P&L: $546.78
+  USDJPY:
+    Trades: 31
+    Win Rate: 0.0%
+    P&L: $-186.62
+  AUDUSD:
+    Trades: 8
+    Win Rate: 37.5%
+    P&L: $-124.29
+
+================================================================================

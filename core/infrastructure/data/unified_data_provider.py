@@ -268,6 +268,10 @@ class UnifiedDataProvider:
         if not mt5_timeframe:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         
+        # Fetch extra bars for indicator calculation (at least 250 for EMA200)
+        # We need more bars than requested to calculate indicators properly
+        bars_to_fetch = max(num_bars + 200, 250)
+        
         # Fetch from MT5 with retries
         max_retries = 3
         for attempt in range(max_retries):
@@ -276,13 +280,14 @@ class UnifiedDataProvider:
                     symbol=symbol,
                     timeframe=mt5_timeframe,
                     start_pos=0,
-                    count=num_bars
+                    count=bars_to_fetch
                 )
                 
                 if rates:
                     df = self._rates_to_dataframe(rates)
                     df = self._calculate_indicators(df)
-                    return df
+                    # Return only the requested number of bars after indicator calculation
+                    return df.tail(num_bars)
                 
             except Exception as e:
                 logger.error(f"MT5 fetch attempt {attempt + 1} failed: {e}")
@@ -325,7 +330,7 @@ class UnifiedDataProvider:
         # but ensure it handles edge cases properly
         
         if len(df) < 200:
-            logger.warning(f"Only {len(df)} bars available for indicator calculation")
+            logger.warning(f"Only {len(df)} bars available for indicator calculation (200+ recommended for EMA200)")
         
         # Use try-except for each indicator to handle failures gracefully
         try:
