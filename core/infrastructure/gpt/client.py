@@ -341,6 +341,70 @@ class GPTClient:
         """Reset usage statistics"""
         self.request_count = 0
         self._session_start = datetime.now(timezone.utc).isoformat()
+    
+    def analyze_with_response(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        model_override: Optional[str] = None
+    ) -> str:
+        """
+        Simple synchronous method for agent analysis
+        
+        Args:
+            prompt: The analysis prompt
+            temperature: Sampling temperature
+            model_override: Override the default model for this request
+            
+        Returns:
+            The GPT response content as string
+        """
+        # Handle async context properly
+        try:
+            loop = asyncio.get_running_loop()
+            # We're already in an async context, use nest_asyncio
+            import nest_asyncio
+            nest_asyncio.apply()
+        except RuntimeError:
+            # No event loop running, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            should_close_loop = True
+        else:
+            should_close_loop = False
+        
+        # Temporarily override model if specified
+        original_model = self.config.model
+        if model_override:
+            self.config.model = model_override
+            # Update encoding for new model
+            self.encoding = self._get_encoding()
+        
+        try:
+            # Run async method synchronously
+            messages = [{"role": "user", "content": prompt}]
+            if should_close_loop:
+                result = loop.run_until_complete(
+                    self.chat_completion(messages, temperature=temperature)
+                )
+            else:
+                # Use asyncio.run_coroutine_threadsafe for existing loop
+                future = asyncio.run_coroutine_threadsafe(
+                    self.chat_completion(messages, temperature=temperature),
+                    loop
+                )
+                result = future.result(timeout=self.config.timeout_seconds)
+            
+            return result['content']
+        finally:
+            # Restore original model
+            if model_override:
+                self.config.model = original_model
+                self.encoding = self._get_encoding()
+            
+            # Close loop if we created it
+            if should_close_loop and not loop.is_closed():
+                loop.close()
 
 
 # Export main class

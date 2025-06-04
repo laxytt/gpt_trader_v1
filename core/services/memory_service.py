@@ -14,8 +14,7 @@ try:
     EMBEDDINGS_AVAILABLE = True
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning("Sentence transformers or FAISS not available. Memory service disabled.")
+    # Don't log at module import time - logging may not be configured yet
 
 from core.domain.models import Trade, TradeCase, TradeResult, create_case_id
 from core.domain.exceptions import MemoryError, ErrorContext
@@ -174,10 +173,11 @@ class MemoryService:
         database_config: DatabaseSettings
     ):
         if not EMBEDDINGS_AVAILABLE:
-            logger.warning("Memory service initialized without embedding support")
+            logger.warning("Memory service initialized without embedding support - sentence_transformers or FAISS not available")
             self._embeddings_enabled = False
         else:
             self._embeddings_enabled = True
+            logger.info("Memory service initialized with embedding support enabled")
         
         self.repository = repository
         self.database_config = database_config

@@ -11,6 +11,7 @@ pandas>=2.0.0
 numpy>=1.24.0
 
 # Machine learning (optional for memory service)
+torch>=2.1.0
 sentence-transformers>=2.2.0
 faiss-cpu>=1.7.0
 seaborn
@@ -23,6 +24,7 @@ mplfinance>=0.12.9b7
 matplotlib>=3.7.0
 streamlit
 plotly
+tabulate>=0.9.0
 
 # Technical analysis
 ta
@@ -32,9 +34,13 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 aiohttp
 schedule
+nest_asyncio
 
 # Database
 joblib
 
 # For circuit breakers
 scipy
+
+
+nest_asyncio

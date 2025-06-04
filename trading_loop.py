@@ -23,7 +23,7 @@ from core.infrastructure.gpt.signal_generator import GPTSignalGenerator
 from core.infrastructure.database.repositories import (
     TradeRepository, SignalRepository, MemoryCaseRepository
 )
-from core.services.signal_service import SignalService
+from core.services.council_signal_service import CouncilSignalService
 from core.services.trade_service import TradeService
 from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
@@ -172,19 +172,21 @@ class DependencyContainer:
                 trading_config=self.settings.trading
             ))
     
-    def signal_service(self) -> SignalService:
-        """Create signal service"""
+    def signal_service(self) -> CouncilSignalService:
+        """Create council signal service"""
         return self.get_or_create('signal_service',
-            lambda: SignalService(
+            lambda: CouncilSignalService(
                 data_provider=self.mt5_data_provider(),
-                signal_generator=self.signal_generator(),
+                gpt_client=self.gpt_client(),
                 news_service=self.news_service(),
                 memory_service=self.memory_service(),
                 signal_repository=self.signal_repository(),
                 trading_config=self.settings.trading,
                 chart_generator=self.chart_generator(),
                 screenshots_dir=str(self.settings.paths.screenshots_dir),
-                model_management_service=self.model_management_service()
+                enable_offline_validation=True,  # Always enabled for council
+                account_balance=getattr(self.settings.mt5, 'initial_balance', 10000),
+                min_confidence_threshold=self.settings.trading.council_min_confidence
             ))
     
     def trade_service(self) -> TradeService:

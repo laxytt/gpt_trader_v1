@@ -32,9 +32,10 @@ class GPTSettings(BaseSettings):
     model_config = ConfigDict(env_prefix="OPENAI_", extra="ignore")
     
     api_key: str = Field(..., description="OpenAI API key")
-    model: str = Field("gpt-4.1-2025-04-14", description="GPT model to use")
+    model: str = Field("gpt-4o-mini", description="GPT model to use")
+    risk_manager_model: str = Field("gpt-4-turbo-preview", description="GPT model for Risk Manager (veto power)")
     max_retries: int = Field(3, description="Maximum retry attempts for API calls")
-    timeout_seconds: int = Field(60, description="Request timeout in seconds")
+    timeout_seconds: int = Field(120, description="Request timeout in seconds")
     max_tokens: Optional[int] = Field(None, description="Maximum tokens per request")
     temperature: float = Field(0.1, description="Temperature for GPT responses")
 
@@ -51,8 +52,16 @@ class TradingSettings(BaseSettings):
     max_open_trades: int = Field(3, gt=0, description="Maximum concurrent open trades")
     bars_for_analysis: int = Field(100, gt=0, description="Number of bars for chart analysis")
     bars_for_json: int = Field(20, gt=0, description="Number of bars for JSON data")
-    cycle_interval_minutes: int = Field(15, gt=0, description="Minutes between trading cycles")
-    offline_validation_threshold: float = Field(0.7, ge=0.0, le=1.0, description="Minimum validation score to proceed with GPT call")
+    cycle_interval_minutes: int = Field(60, gt=0, description="Minutes between trading cycles")
+    offline_validation_threshold: float = Field(0.5, ge=0.0, le=1.0, description="Minimum validation score to proceed with GPT call")
+    
+    # Trading Council settings
+    use_council: bool = Field(True, description="Use multi-agent Trading Council for decisions")
+    council_quick_mode: bool = Field(True, description="Use quick mode (no debates, just initial analysis)")
+    council_min_confidence: float = Field(75.0, ge=0.0, le=100.0, description="Minimum council confidence to trade")
+    council_llm_weight: float = Field(0.7, ge=0.0, le=1.0, description="Weight for LLM confidence in hybrid scoring")
+    council_ml_weight: float = Field(0.3, ge=0.0, le=1.0, description="Weight for ML confidence in hybrid scoring")
+    council_debate_rounds: int = Field(1, ge=1, le=5, description="Number of debate rounds in council")
     
     @field_validator('end_hour')
     @classmethod

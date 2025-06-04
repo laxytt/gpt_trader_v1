@@ -104,6 +104,12 @@ class ReflectionGenerationError(GPTError):
     pass
 
 
+# Agent Related Exceptions
+class AgentError(TradingSystemError):
+    """Base exception for agent-related errors"""
+    pass
+
+
 # Trading Logic Exceptions
 class TradingError(TradingSystemError):
     """Base exception for trading logic errors"""
@@ -355,6 +361,9 @@ __all__ = [
     
     # GPT exceptions
     'GPTError', 'GPTAPIError', 'GPTResponseError', 'SignalGenerationError', 'ReflectionGenerationError',
+    
+    # Agent exceptions
+    'AgentError',
     
     # Trading exceptions
     'TradingError', 'InvalidSignalError', 'TradeExecutionError', 'TradeManagementError',

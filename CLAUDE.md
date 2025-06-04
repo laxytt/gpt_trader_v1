@@ -63,14 +63,26 @@ The system follows DDD principles with clear separation:
 
 3. **Services Layer** (`core/services/`)
    - `trading_orchestrator.py`: Main coordination service
-   - `signal_service.py`: Signal generation with VSA analysis
+   - `council_signal_service.py`: Multi-agent Trading Council signal generation
+   - `signal_service.py`: Legacy single-agent signal generation (deprecated)
    - `trade_service.py`: Trade lifecycle management
    - `market_service.py`: Market data aggregation
    - `memory_service.py`: RAG-based historical trade memory
    - `news_service.py`: Economic news filtering
    - `backtesting_service.py`: Historical strategy testing
 
-4. **Machine Learning** (`core/ml/`)
+4. **Trading Council Agents** (`core/agents/`)
+   - `base_agent.py`: Abstract base class for all agents
+   - `technical_analyst.py`: Chart patterns and indicators specialist
+   - `fundamental_analyst.py`: News and economic analysis
+   - `sentiment_reader.py`: Market psychology expert
+   - `risk_manager.py`: Capital preservation (has veto power)
+   - `momentum_trader.py`: Trend following specialist
+   - `contrarian_trader.py`: Reversal and fade trader
+   - `head_trader.py`: Decision synthesizer and moderator
+   - `council.py`: Orchestrates the multi-agent debate process
+
+5. **Machine Learning** (`core/ml/`)
    - Feature engineering and model training infrastructure
    - Continuous improvement system
 
@@ -86,26 +98,31 @@ The system follows DDD principles with clear separation:
 
 5. **Trading Strategy**:
    - Multi-timeframe analysis (H1 entry, H4 background)
-   - GPT-4 vision for chart analysis with technical indicators
-   - Volume Spread Analysis (VSA) confirmation
+   - Multi-Agent Trading Council with 7 specialized agents
+   - Three-round debate process for consensus building
+   - Hybrid confidence scoring (70% LLM consensus, 30% ML)
+   - Risk manager with veto power for capital preservation
    - Real-time trade management with GPT decisions
 
 ### Data Flow
 1. MT5 → Data Provider → Market Data
-2. Market Data + Screenshots → GPT Signal Generator → Trading Signal
+2. Market Data → Trading Council (7 Agents) → Debate → Consensus → Trading Signal
 3. Trading Signal → Trade Service → MT5 Order Manager
 4. Trade Results → Memory Service (FAISS) → Future Signal Context
 
 ### Key Integration Points
 - **MetaTrader 5**: Real-time data and order execution
-- **OpenAI GPT-4**: Signal generation and trade management
+- **OpenAI GPT-4**: Powers all 7 Trading Council agents
 - **FAISS + SentenceTransformer**: Similar trade case retrieval
 - **Screenshots**: MT5 generates charts, system reads from `screenshots/` directory
+- **Trading Council**: Multi-agent debate system for robust decisions
 
 ## Testing and Validation
 
 Currently no formal test suite. Use:
 - `run_backtest.py` for historical validation
+- `test_council.py` for testing the Trading Council multi-agent system
+- `scripts/visualize_council.py` for visualizing council debates
 - `core/services/offline_validator.py` for signal validation without live trading
 - Monitor logs in `logs/trading_system.log`
 
@@ -115,9 +132,10 @@ Currently no formal test suite. Use:
 Edit `config/symbols.py` and add to appropriate group (conservative, moderate, aggressive)
 
 ### Modifying Trading Strategy
-1. Signal generation logic: `core/infrastructure/gpt/signal_generator.py`
-2. VSA rules: `config/prompts/system_prompt.txt`
-3. Trade management: `config/prompts/management_prompt.txt`
+1. Trading Council agents: `core/agents/` (modify agent behaviors)
+2. Council configuration: `config/settings.py` (TradingSettings class)
+3. Agent prompts: Within each agent class in `core/agents/`
+4. Trade management: `config/prompts/management_prompt.txt`
 
 ### Database Schema Changes
 Run migrations in `core/infrastructure/database/migrations.py`

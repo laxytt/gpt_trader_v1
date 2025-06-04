@@ -13,7 +13,7 @@ from core.domain.models import MarketData, TradingSignal, Trade, SignalType, Tra
 from core.domain.exceptions import (
     TradingSystemError, ErrorContext, ServiceError, ConfigurationError
 )
-from core.services.signal_service import SignalService
+from core.services.council_signal_service import CouncilSignalService
 from core.services.trade_service import TradeService  
 from core.services.news_service import NewsService
 from core.services.memory_service import MemoryService
@@ -46,7 +46,7 @@ class SymbolProcessor:
     
     def __init__(
         self,
-        signal_service: SignalService,
+        signal_service: CouncilSignalService,
         trade_service: TradeService,
         news_service: NewsService,
         trading_settings: TradingSettings,
@@ -264,7 +264,7 @@ class TradingOrchestrator:
     
     def __init__(
         self,
-        signal_service: SignalService,
+        signal_service: CouncilSignalService,
         trade_service: TradeService,
         news_service: NewsService,
         memory_service: MemoryService,

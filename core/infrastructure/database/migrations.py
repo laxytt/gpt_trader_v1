@@ -327,6 +327,43 @@ class AddBacktestResultsMigration(Migration):
         logger.info("Backtest results tables created")
 
 
+class AddMLPredictionsMigration(Migration):
+    """Add ML predictions tracking for continuous improvement"""
+    
+    def __init__(self):
+        super().__init__(6, "Add ML predictions tracking table")
+    
+    def up(self, conn: sqlite3.Connection):
+        """Create ML predictions table"""
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ml_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                symbol TEXT NOT NULL,
+                predicted_signal TEXT NOT NULL,
+                ml_confidence REAL NOT NULL,
+                actual_signal TEXT,
+                was_correct BOOLEAN,
+                model_version TEXT NOT NULL,
+                features_used TEXT NOT NULL,
+                market_conditions TEXT,
+                prediction_timestamp TEXT NOT NULL,
+                signal_id TEXT,
+                FOREIGN KEY (signal_id) REFERENCES signals(id)
+            )
+        """)
+        
+        # Create indexes for performance
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ml_predictions_symbol ON ml_predictions(symbol)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ml_predictions_timestamp ON ml_predictions(prediction_timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ml_predictions_model_version ON ml_predictions(model_version)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ml_predictions_was_correct ON ml_predictions(was_correct)")
+        
+        conn.commit()
+        logger.info("ML predictions table created")
+
+
 class DatabaseMigrator:
     """Manages database migrations"""
     
@@ -341,7 +378,8 @@ class DatabaseMigrator:
             AddTradeMetadataMigration(),
             AddPerformanceMetricsMigration(),
             AddNewsEventsMigration(),
-            AddBacktestResultsMigration()
+            AddBacktestResultsMigration(),
+            AddMLPredictionsMigration()
         ]
     
     def get_current_version(self) -> int:
@@ -500,7 +538,9 @@ class DatabaseMigrator:
                 existing_tables = set(row[0] for row in cursor.fetchall())
                 expected_tables = {
                     'migrations', 'trades', 'signals', 'memory_cases',
-                    'daily_performance', 'symbol_performance', 'news_events'
+                    'daily_performance', 'symbol_performance', 'news_events',
+                    'backtest_runs', 'backtest_trades', 'backtest_equity_curves',
+                    'ml_predictions'
                 }
                 
                 missing_tables = expected_tables - existing_tables

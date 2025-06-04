@@ -139,5 +139,17 @@ class GPTModels:
             "supports_vision": True,
             "cost_per_1k_input": 0.01,
             "cost_per_1k_output": 0.03
+        },
+        "gpt-4-turbo-preview": {
+            "max_tokens": 4096,
+            "supports_vision": True,
+            "cost_per_1k_input": 0.01,
+            "cost_per_1k_output": 0.03
+        },
+        "gpt-4o-mini": {
+            "max_tokens": 16384,
+            "supports_vision": True,
+            "cost_per_1k_input": 0.00015,  # $0.15 per million
+            "cost_per_1k_output": 0.0006   # $0.60 per million
         }
     }

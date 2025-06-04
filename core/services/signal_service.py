@@ -834,17 +834,17 @@ class SignalService:
         return TradingSignal(
             symbol=symbol,
             signal=signal_type,
-            confidence=int(confidence * 100),
-            entry_price=current_candle.close,
+            entry=current_candle.close,
             stop_loss=stop_loss,
             take_profit=take_profit,
             risk_class=risk_class,
-            rationale=f"ML model prediction with {confidence:.1%} confidence",
+            reason=f"ML model prediction with {confidence:.1%} confidence",
             timestamp=datetime.now(timezone.utc),
-            metadata={
+            market_context={
                 'ml_model_id': self._ml_metadata.model_id,
                 'ml_confidence': confidence,
-                'source': 'ml_primary'
+                'source': 'ml_primary',
+                'confidence': int(confidence * 100)
             }
         )
     
