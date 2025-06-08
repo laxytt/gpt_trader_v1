@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 import json
+from scripts.auth_utils import DashboardAuth
+
 from typing import Dict, List, Any, Optional
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -42,6 +44,12 @@ class MLImprovementDashboard:
             page_icon="🤖",
             layout="wide"
         )
+# Initialize authentication
+auth = DashboardAuth("ML Trading Model Dashboard")
+
+# Protect the app - this will show login form if not authenticated
+auth.protect_app()
+
         
         st.title("🤖 ML Trading Model Dashboard")
         st.markdown("Monitor and manage machine learning model performance")
