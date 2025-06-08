@@ -8,6 +8,7 @@ import logging
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass
+import numpy as np
 
 from core.agents.base_agent import AgentType, AgentAnalysis, DebateResponse
 from core.agents.technical_analyst import TechnicalAnalyst
@@ -19,6 +20,7 @@ from core.agents.contrarian_trader import ContrarianTrader
 from core.agents.head_trader import HeadTrader
 from core.domain.models import MarketData, TradingSignal, SignalType, RiskClass
 from core.infrastructure.gpt.client import GPTClient
+from core.services.council_optimizer import CouncilOptimizer
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,9 @@ class TradingCouncil:
         risk_per_trade: float = 0.02,
         min_confidence_threshold: float = 75.0,
         llm_weight: float = 0.7,
-        ml_weight: float = 0.3
+        ml_weight: float = 0.3,
+        agent_delay: float = 0.5,
+        trading_config: Optional[Any] = None
     ):
         """
         Initialize the trading council
@@ -63,11 +67,13 @@ class TradingCouncil:
             min_confidence_threshold: Minimum confidence to trade
             llm_weight: Weight for LLM confidence (0-1)
             ml_weight: Weight for ML confidence (0-1)
+            trading_config: Trading configuration for optimization
         """
         self.gpt_client = gpt_client
         self.min_confidence = min_confidence_threshold
         self.llm_weight = llm_weight
         self.ml_weight = ml_weight
+        self.agent_delay = agent_delay
         
         # Initialize all agents
         self.agents = {
@@ -81,9 +87,51 @@ class TradingCouncil:
         }
         
         self.council_history = []
+        
+        # Initialize optimizer if config provided
+        self.optimizer = CouncilOptimizer(trading_config) if trading_config else None
     
     def _get_majority_decision(self, agent_analyses: List[AgentAnalysis]) -> AgentAnalysis:
-        """Get decision based on majority vote"""
+        """Get decision based on majority vote WITH risk manager veto power"""
+        
+        # CRITICAL: Check for Risk Manager veto first
+        risk_manager_analysis = next(
+            (a for a in agent_analyses if a.agent_type == AgentType.RISK_MANAGER), 
+            None
+        )
+        
+        if risk_manager_analysis:
+            # Risk Manager has veto power on high-risk trades
+            if risk_manager_analysis.recommendation == SignalType.WAIT:
+                # Check if it's a strong veto (confidence > 80%)
+                if risk_manager_analysis.confidence >= 80:
+                    return AgentAnalysis(
+                        agent_type=AgentType.HEAD_TRADER,
+                        recommendation=SignalType.WAIT,
+                        confidence=risk_manager_analysis.confidence,
+                        reasoning=[
+                            "Risk Manager VETO: Trade rejected due to unacceptable risk",
+                            *risk_manager_analysis.reasoning
+                        ],
+                        concerns=risk_manager_analysis.concerns,
+                        metadata={'veto': True, 'veto_by': 'risk_manager'}
+                    )
+            
+            # Also check for explicit high risk in metadata
+            if risk_manager_analysis.metadata and risk_manager_analysis.metadata.get('risk_level') == 'High':
+                return AgentAnalysis(
+                    agent_type=AgentType.HEAD_TRADER,
+                    recommendation=SignalType.WAIT,
+                    confidence=90.0,  # High confidence in avoiding high risk
+                    reasoning=[
+                        "Risk Manager VETO: High risk level detected",
+                        *risk_manager_analysis.concerns
+                    ],
+                    concerns=risk_manager_analysis.concerns,
+                    metadata={'veto': True, 'veto_by': 'risk_manager', 'risk_level': 'High'}
+                )
+        
+        # If no veto, proceed with normal voting
         votes = {'BUY': [], 'SELL': [], 'WAIT': []}
         
         for analysis in agent_analyses:
@@ -104,7 +152,7 @@ class TradingCouncil:
                 agent_type=AgentType.HEAD_TRADER,
                 recommendation=SignalType.BUY,
                 confidence=avg_confidence,
-                reasoning=["Majority vote: BUY"],
+                reasoning=["Majority vote: BUY (Risk Manager approved)"],
                 concerns=[],
                 entry_price=votes['BUY'][0].entry_price,
                 stop_loss=votes['BUY'][0].stop_loss,
@@ -116,7 +164,7 @@ class TradingCouncil:
                 agent_type=AgentType.HEAD_TRADER,
                 recommendation=SignalType.SELL,
                 confidence=avg_confidence,
-                reasoning=["Majority vote: SELL"],
+                reasoning=["Majority vote: SELL (Risk Manager approved)"],
                 concerns=[],
                 entry_price=votes['SELL'][0].entry_price,
                 stop_loss=votes['SELL'][0].stop_loss,
@@ -213,7 +261,7 @@ class TradingCouncil:
                 }
             else:
                 # Phase 2: Three-round debate
-                debate_log = await self._conduct_debate(agent_analyses)
+                debate_log = await self._conduct_debate(agent_analyses, market_data)
                 
                 # Phase 3: Head trader synthesis
                 final_decision, council_summary = await self._synthesize_decision(
@@ -296,14 +344,26 @@ class TradingCouncil:
                     )
                 )
         
-        # Run all analyses in parallel
-        analyses = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+        # Run analyses sequentially with delays to avoid rate limits
+        analyses = []
+        agent_delay = self.agent_delay  # Use configurable delay
+        
+        for i, task in enumerate(analysis_tasks):
+            if i > 0:  # Add delay after first agent
+                await asyncio.sleep(agent_delay)
+            
+            try:
+                analysis = await task
+                analyses.append(analysis)
+            except Exception as e:
+                logger.error(f"Agent analysis failed: {e}")
+                analyses.append(e)
         
         # Filter out any errors
         valid_analyses = []
         for i, analysis in enumerate(analyses):
             if isinstance(analysis, Exception):
-                logger.error(f"Agent analysis failed: {analysis}")
+                logger.error(f"Agent analysis error: {analysis}")
             else:
                 valid_analyses.append(analysis)
         
@@ -311,13 +371,51 @@ class TradingCouncil:
     
     async def _conduct_debate(
         self,
-        agent_analyses: List[AgentAnalysis]
+        agent_analyses: List[AgentAnalysis],
+        market_data: Dict[str, MarketData]
     ) -> List[DebateResponse]:
-        """Phase 2: Conduct three-round debate"""
+        """Phase 2: Conduct debate with optimization"""
         
         debate_log = []
         
-        for round_number in range(1, 4):
+        # Check if we need full debate using optimizer
+        if self.optimizer:
+            # Extract initial signals for optimization check
+            initial_signals = {
+                str(a.agent_type.value): {
+                    'signal': a.recommendation,
+                    'confidence': a.confidence
+                }
+                for a in agent_analyses
+            }
+            
+            needs_debate, reason = self.optimizer.needs_full_debate(
+                initial_signals, 
+                list(market_data.values())[0] if market_data else None
+            )
+            
+            if not needs_debate:
+                logger.info(f"Skipping full debate: {reason}")
+                self.optimizer.update_stats('immediate' if reason in ['risk_veto', 'obvious_pattern'] else 'early_stop', 1)
+                
+                # Create minimal debate log
+                for analysis in agent_analyses:
+                    response = DebateResponse(
+                        agent_type=analysis.agent_type,
+                        round=1,
+                        maintains_position=True,
+                        points=[f"Initial position: {analysis.recommendation.value}"],
+                        confidence_change=0
+                    )
+                    debate_log.append(response)
+                
+                return debate_log
+        
+        # Conduct full debate with potential early stopping
+        max_rounds = 3 if not self.optimizer else self.optimizer.trading_config.council_debate_rounds
+        round_results = []
+        
+        for round_number in range(1, max_rounds + 1):
             logger.debug(f"Starting debate round {round_number}")
             
             round_responses = []
@@ -348,6 +446,28 @@ class TradingCouncil:
             
             # Add all responses to debate log
             debate_log.extend(round_responses)
+            
+            # Check if we should continue debate
+            if self.optimizer and round_number < max_rounds:
+                # Calculate current consensus
+                current_consensus = self._calculate_consensus(round_responses)
+                round_results.append({
+                    'confidence': current_consensus * 100,
+                    'consensus_level': current_consensus
+                })
+                
+                continue_debate, stop_reason = self.optimizer.optimize_debate_rounds(
+                    round_results,
+                    self.min_confidence
+                )
+                
+                if not continue_debate:
+                    logger.info(f"Early stopping debate at round {round_number}: {stop_reason}")
+                    self.optimizer.update_stats('early_stop', round_number)
+                    break
+        
+        if self.optimizer and round_number == max_rounds:
+            self.optimizer.update_stats('full_debate', max_rounds)
         
         return debate_log
     
@@ -545,3 +665,25 @@ class TradingCouncil:
     def get_recent_decisions(self, limit: int = 10) -> List[CouncilDecision]:
         """Get recent council decisions"""
         return self.council_history[-limit:]
+    
+    def _calculate_consensus(self, responses: List[DebateResponse]) -> float:
+        """Calculate consensus level from debate responses"""
+        if not responses:
+            return 0.0
+        
+        # Count agents maintaining positions
+        maintaining = sum(1 for r in responses if r.maintains_position)
+        total = len(responses)
+        
+        # Base consensus on position stability
+        consensus = maintaining / total
+        
+        # Adjust for confidence changes
+        confidence_changes = [abs(r.confidence_change) for r in responses]
+        avg_change = np.mean(confidence_changes) if confidence_changes else 0
+        
+        # High confidence changes indicate uncertainty
+        if avg_change > 10:
+            consensus *= 0.8
+        
+        return consensus
