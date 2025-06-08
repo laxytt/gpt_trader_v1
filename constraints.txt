@@ -1,0 +1,52 @@
+# Version constraints for indirect dependencies
+# This file helps ensure consistent environments across installations
+# Use with: pip install -c constraints.txt -r requirements.txt
+
+# Security-critical indirect dependencies
+urllib3>=1.26.18,<2.0.0  # Used by requests
+certifi>=2023.7.22  # SSL certificates
+cryptography>=41.0.7  # Used by various packages
+charset-normalizer>=3.3.2  # Used by requests
+idna>=3.6  # Used by requests
+
+# Data science ecosystem
+scikit-learn>=1.3.0,<1.4.0  # Ensure compatibility
+scipy>=1.11.0,<1.12.0  # Numerical computations
+numba>=0.58.0  # Used by some ML packages
+
+# Async ecosystem
+anyio>=4.0.0,<5.0.0  # Used by httpx and others
+sniffio>=1.3.0  # Async library detection
+attrs>=23.0.0  # Used by various packages
+
+# Jupyter ecosystem (if using notebooks)
+ipywidgets>=8.1.0,<9.0.0
+jupyterlab>=4.0.0,<5.0.0
+nbformat>=5.9.0,<6.0.0
+nbconvert>=7.11.0,<8.0.0
+
+# Common utilities
+click>=8.1.0,<9.0.0  # CLI framework
+colorama>=0.4.6  # Cross-platform colored terminal text
+tqdm>=4.66.0  # Progress bars
+python-dateutil>=2.8.2  # Date utilities
+pytz>=2023.3  # Timezone support
+six>=1.16.0  # Python 2/3 compatibility
+
+# Markdown and documentation
+Markdown>=3.5.0
+Pygments>=2.17.0  # Syntax highlighting
+
+# Windows-specific (optional)
+pywin32>=306; sys_platform == 'win32'
+pywin32-ctypes>=0.2.2; sys_platform == 'win32'
+
+# Version upper bounds to prevent breaking changes
+pydantic<3.0.0  # Major version cap
+pandas<3.0.0  # Major version cap
+numpy<2.0.0  # Major version cap
+matplotlib<4.0.0  # Major version cap
+
+# Known problematic version combinations to avoid
+# werkzeug!=2.3.0  # Has issues with certain Flask versions
+# jinja2<3.1.0  # Template engine compatibility
