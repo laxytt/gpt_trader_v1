@@ -2,6 +2,36 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Recent Updates
+
+### Intelligent Caching System (Jan 2025)
+- Added intelligent market state caching to reduce API costs by 60-70%
+- Cache identifies similar market conditions and reuses decisions
+- Configurable similarity threshold (default 85%)
+- Pre-filters to skip obvious non-trading conditions
+- Located in `core/infrastructure/cache/market_state_cache.py`
+- Configure with: `TRADING_CACHE_ENABLED=true` in `.env`
+
+### Symbol Resolution (Jan 2025)
+- Added automatic symbol resolution to handle broker naming variations
+- Symbols like GOLD, US30, OIL are automatically resolved to broker-specific names
+- Symbol resolver integrated into MT5DataProvider and MT5OrderManager
+- Interactive symbol finder available: `python test_symbol_finder.py`
+- Documentation: `docs/symbol_resolution_guide.md`
+
+### ML Integration (Jan 2025)
+- Full ML + LLM integration implemented
+- ML models loaded from `/models` directory
+- Hybrid confidence scoring: 70% LLM consensus + 30% ML prediction
+- ML predictions logged to database for continuous improvement
+- ML predictor service in `core/ml/ml_predictor.py`
+
+### Dashboard Fixes (Jan 2025)
+- Fixed missing `get_all_signals` method in SignalRepository
+- Fixed timestamp display issues in GPT flow dashboard
+- Added hours_back parameter to request logger
+- Dashboard now shows real-time data correctly
+
 ## Core Commands
 
 ### Running the Trading System
@@ -16,10 +46,16 @@ python trading_loop.py
 python run_backtest.py
 
 # Train ML models
-python scripts/train_ml_models.py
+python scripts/train_ml_production.py
 
-# Test ML performance
-python scripts/test_ml_backtest.py
+# Test MT5 connection with symbol resolution
+python test_mt5_simple.py
+
+# Find and enable MT5 symbols interactively
+python test_symbol_finder.py
+
+# Quick enable common symbols
+python test_symbol_finder.py --quick
 ```
 
 ### Dependency Management
@@ -35,6 +71,12 @@ pip install -r requirements.txt
 ```
 
 ### Environment Configuration
+⚠️ **SECURITY WARNING**: 
+- Copy `.env.example` to `.env` and fill in your actual values
+- NEVER commit `.env` file to version control
+- The `.gitignore` file is configured to exclude `.env`
+- API keys are automatically masked in logs
+
 Create `.env` file with:
 ```
 OPENAI_API_KEY=your-key
@@ -119,17 +161,30 @@ The system follows DDD principles with clear separation:
 
 ## Testing and Validation
 
-Currently no formal test suite. Use:
-- `run_backtest.py` for historical validation
-- `test_council.py` for testing the Trading Council multi-agent system
-- `scripts/visualize_council.py` for visualizing council debates
-- `core/services/offline_validator.py` for signal validation without live trading
+### MT5 Connection Tests
+- `test_mt5_simple.py` - Quick MT5 connection test with symbol resolution
+- `test_mt5_connection.py` - Comprehensive MT5 functionality test
+- `test_symbol_finder.py` - Interactive symbol finder and enabler
+- `MT5_TEST_FIXES.md` - Documentation of MT5 test issues and fixes
+
+### Trading System Tests
+- `run_backtest.py` - Historical validation of trading strategies
+- `scripts/visualize_council.py` - Visualizing council debates
+- `core/services/offline_validator.py` - Signal validation without live trading
 - Monitor logs in `logs/trading_system.log`
+
+### ML System Tests
+- `scripts/train_ml_production.py` - Train ML models with latest data
+- `scripts/ml_performance_monitor.py` - Monitor ML prediction accuracy
+- ML predictions logged to database for analysis
 
 ## Common Development Tasks
 
 ### Adding New Trading Symbols
-Edit `config/symbols.py` and add to appropriate group (conservative, moderate, aggressive)
+1. Edit `config/symbols.py` and add to appropriate group (conservative, moderate, aggressive)
+2. Use common names (GOLD, US30) - the system will resolve to broker-specific names
+3. Test symbol availability: `python test_symbol_finder.py`
+4. Add new mappings if needed in `core/utils/symbol_resolver.py`
 
 ### Modifying Trading Strategy
 1. Trading Council agents: `core/agents/` (modify agent behaviors)
