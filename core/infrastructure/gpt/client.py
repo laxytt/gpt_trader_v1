@@ -10,6 +10,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 import asyncio
 import tiktoken
+import uuid
 
 import openai
 from openai import OpenAI
@@ -21,6 +22,9 @@ from core.domain.exceptions import (
 )
 from core.domain.enums import GPTModels
 from core.utils.circuit_breaker import gpt_circuit_breaker
+from core.infrastructure.gpt.request_logger import GPTRequest, get_request_logger
+from core.infrastructure.gpt.rate_limiter import get_rate_limiter
+from core.utils.async_task_manager import get_task_manager
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +46,15 @@ class GPTClient:
         self.last_request_time = 0
         self.min_request_interval = 1.0  # Minimum seconds between requests
         
+        # Production components
+        self.request_logger = get_request_logger()
+        self.rate_limiter = get_rate_limiter()
+        
+        # Metadata for logging
+        self.current_agent_type = None
+        self.current_symbol = None
+        self.current_request_type = None
+        
     def _get_encoding(self) -> tiktoken.Encoding:
         """Get tiktoken encoding for token counting"""
         try:
@@ -55,7 +68,10 @@ class GPTClient:
         messages: List[Dict[str, Any]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        agent_type: Optional[str] = None,
+        symbol: Optional[str] = None,
+        request_type: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Send chat completion request to GPT API.
@@ -65,6 +81,9 @@ class GPTClient:
             temperature: Sampling temperature (0-2)
             max_tokens: Maximum tokens in response
             timeout: Request timeout in seconds
+            agent_type: Agent making the request (for logging)
+            symbol: Trading symbol (for logging)
+            request_type: Type of request (analyze, debate, synthesize)
             
         Returns:
             Dictionary containing response and metadata
@@ -74,21 +93,42 @@ class GPTClient:
             GPTResponseError: If response is invalid
             TimeoutError: If request times out
         """
-        # Apply rate limiting
-        await self._apply_rate_limiting()
-        
         # Set defaults
         temperature = temperature or self.config.temperature
         max_tokens = max_tokens or self.config.max_tokens
         timeout = timeout or self.config.timeout_seconds
         
+        # Update metadata for logging
+        agent_type = agent_type or self.current_agent_type
+        symbol = symbol or self.current_symbol
+        request_type = request_type or self.current_request_type or 'unknown'
+        
+        # Create request ID for tracking
+        request_id = str(uuid.uuid4())
+        start_time = time.time()
+        
         with ErrorContext("GPT API call") as ctx:
             ctx.add_detail("model", self.config.model)
             ctx.add_detail("message_count", len(messages))
+            ctx.add_detail("request_id", request_id)
+            ctx.add_detail("agent_type", agent_type)
+            ctx.add_detail("symbol", symbol)
             
             # Estimate token usage
             input_tokens = self._estimate_tokens(messages)
             ctx.add_detail("estimated_input_tokens", input_tokens)
+            
+            # Apply production rate limiting
+            priority = 2 if agent_type == "RiskManager" else 1  # Higher priority for risk manager
+            acquired = await self.rate_limiter.wait_if_needed(
+                model=self.config.model,
+                estimated_tokens=input_tokens,
+                max_wait=30.0,
+                priority=priority
+            )
+            
+            if not acquired:
+                raise GPTAPIError("Rate limit timeout - unable to acquire tokens")
             
             # Prepare request parameters
             request_params = {
@@ -101,17 +141,69 @@ class GPTClient:
             if max_tokens:
                 request_params["max_tokens"] = max_tokens
             
-            # Execute request with retries
-            response = await self._execute_with_retries(request_params)
+            # Create GPT request for logging
+            gpt_request = GPTRequest(
+                id=request_id,
+                timestamp=datetime.now(timezone.utc),
+                model=self.config.model,
+                agent_type=agent_type,
+                symbol=symbol,
+                request_type=request_type,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
             
-            # Process and validate response
-            result = self._process_response(response, input_tokens)
-            
-            self.request_count += 1
-            logger.info(f"GPT request completed - Tokens: {result['token_usage']['total_tokens']}, "
-                       f"Cost: ${result['estimated_cost']:.4f}")
-            
-            return result
+            try:
+                # Execute request with retries
+                response = await self._execute_with_retries(request_params)
+                
+                # Process and validate response
+                result = self._process_response(response, input_tokens)
+                
+                # Update request with response data
+                gpt_request.response_text = result['content']
+                gpt_request.completion_tokens = result['token_usage']['completion_tokens']
+                gpt_request.prompt_tokens = result['token_usage']['prompt_tokens']
+                gpt_request.total_tokens = result['token_usage']['total_tokens']
+                gpt_request.cost = result['estimated_cost']
+                gpt_request.duration_ms = int((time.time() - start_time) * 1000)
+                
+                # Report actual usage to rate limiter
+                self.rate_limiter.report_actual_usage(
+                    model=self.config.model,
+                    actual_tokens=result['token_usage']['total_tokens']
+                )
+                
+                self.request_count += 1
+                logger.info(f"GPT request completed - Agent: {agent_type}, "
+                           f"Tokens: {result['token_usage']['total_tokens']}, "
+                           f"Cost: ${result['estimated_cost']:.4f}, "
+                           f"Duration: {gpt_request.duration_ms}ms")
+                
+                # Log request asynchronously with task tracking
+                task_manager = get_task_manager()
+                task_manager.create_task(
+                    self.request_logger.log_request(gpt_request),
+                    name=f"log_gpt_request_{gpt_request.id}",
+                    error_handler=lambda e: logger.error(f"Failed to log GPT request: {e}")
+                )
+                
+                return result
+                
+            except Exception as e:
+                # Log error
+                gpt_request.error = str(e)
+                gpt_request.duration_ms = int((time.time() - start_time) * 1000)
+                
+                # Log error request with task tracking
+                task_manager = get_task_manager()
+                task_manager.create_task(
+                    self.request_logger.log_request(gpt_request),
+                    name=f"log_gpt_error_{gpt_request.id}",
+                    error_handler=lambda e: logger.error(f"Failed to log GPT error: {e}")
+                )
+                raise
     
     async def _apply_rate_limiting(self):
         """Apply rate limiting between requests"""
@@ -133,6 +225,10 @@ class GPTClient:
         for attempt in range(self.config.max_retries):
             try:
                 logger.debug(f"GPT API attempt {attempt + 1}/{self.config.max_retries}")
+                
+                # Update retry count in request params for logging
+                if hasattr(self, '_current_gpt_request'):
+                    self._current_gpt_request.retry_count = attempt
                 
                 # Make async call (simulate with sync for now since OpenAI doesn't have true async)
                 response = await asyncio.get_event_loop().run_in_executor(
@@ -346,7 +442,9 @@ class GPTClient:
         self,
         prompt: str,
         temperature: Optional[float] = None,
-        model_override: Optional[str] = None
+        model_override: Optional[str] = None,
+        agent_type: Optional[str] = None,
+        symbol: Optional[str] = None
     ) -> str:
         """
         Simple synchronous method for agent analysis
@@ -355,23 +453,22 @@ class GPTClient:
             prompt: The analysis prompt
             temperature: Sampling temperature
             model_override: Override the default model for this request
+            agent_type: Agent making the request
+            symbol: Trading symbol
             
         Returns:
             The GPT response content as string
         """
-        # Handle async context properly
+        # Check if we're already in an async context
         try:
             loop = asyncio.get_running_loop()
-            # We're already in an async context, use nest_asyncio
+            # We're in an async context, use nest_asyncio to handle it
             import nest_asyncio
             nest_asyncio.apply()
         except RuntimeError:
             # No event loop running, create a new one
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            should_close_loop = True
-        else:
-            should_close_loop = False
         
         # Temporarily override model if specified
         original_model = self.config.model
@@ -383,17 +480,15 @@ class GPTClient:
         try:
             # Run async method synchronously
             messages = [{"role": "user", "content": prompt}]
-            if should_close_loop:
-                result = loop.run_until_complete(
-                    self.chat_completion(messages, temperature=temperature)
+            result = loop.run_until_complete(
+                self.chat_completion(
+                    messages, 
+                    temperature=temperature,
+                    agent_type=agent_type or self.current_agent_type,
+                    symbol=symbol or self.current_symbol,
+                    request_type='analyze'
                 )
-            else:
-                # Use asyncio.run_coroutine_threadsafe for existing loop
-                future = asyncio.run_coroutine_threadsafe(
-                    self.chat_completion(messages, temperature=temperature),
-                    loop
-                )
-                result = future.result(timeout=self.config.timeout_seconds)
+            )
             
             return result['content']
         finally:
@@ -402,9 +497,15 @@ class GPTClient:
                 self.config.model = original_model
                 self.encoding = self._get_encoding()
             
-            # Close loop if we created it
-            if should_close_loop and not loop.is_closed():
-                loop.close()
+            # Close the loop
+            loop.close()
+    
+    def set_context(self, agent_type: Optional[str] = None, symbol: Optional[str] = None):
+        """Set context for request logging"""
+        if agent_type:
+            self.current_agent_type = agent_type
+        if symbol:
+            self.current_symbol = symbol
 
 
 # Export main class

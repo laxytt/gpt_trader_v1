@@ -85,6 +85,18 @@ class Candle:
     atr14: Optional[float] = None
     rsi_slope: Optional[float] = None
     
+    # Additional indicators for position trading
+    ema20: Optional[float] = None
+    sma50: Optional[float] = None
+    sma200: Optional[float] = None
+    true_range: Optional[float] = None
+    atr_percentage: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    body_size: Optional[float] = None
+    upper_shadow: Optional[float] = None
+    lower_shadow: Optional[float] = None
+    weekly_range: Optional[float] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
         return {
@@ -99,7 +111,17 @@ class Candle:
             'ema200': self.ema200,
             'rsi14': self.rsi14,
             'atr14': self.atr14,
-            'rsi_slope': self.rsi_slope
+            'rsi_slope': self.rsi_slope,
+            'ema20': self.ema20,
+            'sma50': self.sma50,
+            'sma200': self.sma200,
+            'true_range': self.true_range,
+            'atr_percentage': self.atr_percentage,
+            'volume_ratio': self.volume_ratio,
+            'body_size': self.body_size,
+            'upper_shadow': self.upper_shadow,
+            'lower_shadow': self.lower_shadow,
+            'weekly_range': self.weekly_range
         }
 
 

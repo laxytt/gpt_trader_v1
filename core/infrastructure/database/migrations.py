@@ -364,6 +364,88 @@ class AddMLPredictionsMigration(Migration):
         logger.info("ML predictions table created")
 
 
+class AddMarketAuxTablesMigration(Migration):
+    """Add MarketAux news integration tables"""
+    
+    def __init__(self):
+        super().__init__(7, "Add MarketAux news and sentiment tables")
+    
+    def up(self, conn: sqlite3.Connection):
+        """Create MarketAux related tables"""
+        
+        # MarketAux articles cache
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS marketaux_articles (
+                uuid TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                snippet TEXT,
+                url TEXT NOT NULL,
+                image_url TEXT,
+                published_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                relevance_score REAL,
+                countries TEXT,  -- JSON array
+                entities TEXT,   -- JSON array
+                highlights TEXT, -- JSON array
+                sentiment_data TEXT,  -- JSON object
+                symbols TEXT,    -- JSON array
+                keywords TEXT,   -- JSON array
+                is_high_impact INTEGER DEFAULT 0,
+                cached_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+        """)
+        
+        # API usage tracking
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS marketaux_api_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_time TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                params TEXT,  -- JSON
+                response_code INTEGER,
+                articles_returned INTEGER,
+                error_message TEXT
+            )
+        """)
+        
+        # Rate limiting tracking
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS marketaux_rate_limits (
+                date TEXT PRIMARY KEY,
+                requests_today INTEGER DEFAULT 0,
+                last_request_time TEXT,
+                daily_limit INTEGER DEFAULT 100
+            )
+        """)
+        
+        # News sentiment tracking for trades
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trade_news_sentiment (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                sentiment_score REAL NOT NULL,
+                sentiment_label TEXT NOT NULL,
+                article_count INTEGER NOT NULL,
+                high_impact_count INTEGER NOT NULL,
+                analysis_timestamp TEXT NOT NULL,
+                FOREIGN KEY (trade_id) REFERENCES trades(id)
+            )
+        """)
+        
+        # Create indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_marketaux_articles_published ON marketaux_articles(published_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_marketaux_articles_expires ON marketaux_articles(expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_marketaux_api_usage_time ON marketaux_api_usage(request_time)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_news_sentiment_trade ON trade_news_sentiment(trade_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_news_sentiment_symbol ON trade_news_sentiment(symbol)")
+        
+        conn.commit()
+        logger.info("MarketAux tables created")
+
+
 class DatabaseMigrator:
     """Manages database migrations"""
     
@@ -379,7 +461,8 @@ class DatabaseMigrator:
             AddPerformanceMetricsMigration(),
             AddNewsEventsMigration(),
             AddBacktestResultsMigration(),
-            AddMLPredictionsMigration()
+            AddMLPredictionsMigration(),
+            AddMarketAuxTablesMigration()
         ]
     
     def get_current_version(self) -> int:

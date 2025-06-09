@@ -4,6 +4,7 @@ Manages historical trade data for pattern recognition and learning.
 """
 
 import logging
+import sqlite3
 import numpy as np
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
@@ -258,11 +259,19 @@ class MemoryService:
                 else:
                     embedding_bytes = b''  # Empty bytes for disabled embeddings
                 
-                # Save to database
-                self.repository.save_case(case, embedding_bytes)
-                
-                # Cleanup old cases if needed
-                await self._cleanup_old_cases()
+                # Save to database using atomic operation
+                try:
+                    with self.repository.atomic_operation() as conn:
+                        self.repository.save_case_in_transaction(conn, case, embedding_bytes)
+                        # Cleanup old cases within same transaction if needed
+                        await self._cleanup_old_cases_in_transaction(conn)
+                except Exception as db_error:
+                    # If database save fails, remove from search index
+                    if self._embeddings_enabled and hasattr(self.search_engine, 'remove_last'):
+                        self.search_engine.case_ids.pop()  # Remove the ID we just added
+                        self.search_engine.index.reset()  # Need to rebuild index
+                        self._load_existing_cases()  # Reload to restore consistency
+                    raise
                 
                 logger.info(f"Added trade case to memory: {case.id}")
                 return True
@@ -480,6 +489,32 @@ class MemoryService:
                     self._load_existing_cases()
         except Exception as e:
             logger.error(f"Failed to cleanup old cases: {e}")
+    
+    async def _cleanup_old_cases_in_transaction(self, conn: sqlite3.Connection):
+        """Remove old cases within a transaction if we exceed the maximum"""
+        try:
+            # Count current cases
+            cursor = conn.execute("SELECT COUNT(*) FROM memory_cases")
+            current_count = cursor.fetchone()[0]
+            
+            if current_count <= self.max_cases:
+                return
+            
+            # Remove oldest cases
+            cases_to_remove = current_count - self.max_cases
+            conn.execute("""
+                DELETE FROM memory_cases 
+                WHERE id IN (
+                    SELECT id FROM memory_cases 
+                    ORDER BY timestamp ASC 
+                    LIMIT ?
+                )
+            """, (cases_to_remove,))
+            
+            logger.debug(f"Cleaned up {cases_to_remove} old cases in transaction")
+        except Exception as e:
+            logger.error(f"Failed to cleanup old cases in transaction: {e}")
+            raise
     
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get memory service statistics"""

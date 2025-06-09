@@ -270,7 +270,13 @@ class UnifiedDataProvider:
         
         # Fetch extra bars for indicator calculation (at least 250 for EMA200)
         # We need more bars than requested to calculate indicators properly
-        bars_to_fetch = max(num_bars + 200, 250)
+        # For daily/weekly timeframes, ensure we have enough history
+        if timeframe == TimeFrame.D1:
+            bars_to_fetch = max(num_bars + 200, 300)  # Extra buffer for daily
+        elif timeframe == TimeFrame.W1:
+            bars_to_fetch = max(num_bars + 52, 104)   # At least 2 years of weekly data
+        else:
+            bars_to_fetch = max(num_bars + 200, 250)
         
         # Fetch from MT5 with retries
         max_retries = 3
@@ -336,8 +342,17 @@ class UnifiedDataProvider:
         try:
             df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
             df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+            # Additional EMAs for position trading
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
         except Exception as e:
             logger.error(f"EMA calculation failed: {e}")
+        
+        try:
+            # SMA calculations for position trading
+            df['sma50'] = df['close'].rolling(window=50).mean()
+            df['sma200'] = df['close'].rolling(window=200).mean()
+        except Exception as e:
+            logger.error(f"SMA calculation failed: {e}")
         
         try:
             # RSI calculation
@@ -346,6 +361,7 @@ class UnifiedDataProvider:
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rs = gain / loss
             df['rsi14'] = 100 - (100 / (1 + rs))
+            df['rsi_slope'] = df['rsi14'].diff()
         except Exception as e:
             logger.error(f"RSI calculation failed: {e}")
         
@@ -357,8 +373,32 @@ class UnifiedDataProvider:
             ranges = pd.concat([high_low, high_close, low_close], axis=1)
             true_range = ranges.max(axis=1)
             df['atr14'] = true_range.rolling(window=14).mean()
+            df['true_range'] = true_range
+            
+            # ATR as percentage for position sizing
+            df['atr_percentage'] = (df['atr14'] / df['close']) * 100
         except Exception as e:
             logger.error(f"ATR calculation failed: {e}")
+        
+        try:
+            # Volume indicators
+            df['sma_volume'] = df['volume'].rolling(window=20).mean()
+            df['volume_ratio'] = df['volume'] / df['sma_volume']
+        except Exception as e:
+            logger.error(f"Volume calculation failed: {e}")
+        
+        try:
+            # Price range analysis for VSA
+            df['body_size'] = abs(df['close'] - df['open'])
+            df['upper_shadow'] = df['high'] - np.maximum(df['open'], df['close'])
+            df['lower_shadow'] = np.minimum(df['open'], df['close']) - df['low']
+            
+            # Position trading specific - weekly range
+            df['weekly_high'] = df['high'].rolling(window=5).max()
+            df['weekly_low'] = df['low'].rolling(window=5).min()
+            df['weekly_range'] = df['weekly_high'] - df['weekly_low']
+        except Exception as e:
+            logger.error(f"Price range calculation failed: {e}")
         
         return df
     
@@ -383,7 +423,18 @@ class UnifiedDataProvider:
                 ema50=float(row['ema50']) if pd.notna(row.get('ema50')) else None,
                 ema200=float(row['ema200']) if pd.notna(row.get('ema200')) else None,
                 rsi14=float(row['rsi14']) if pd.notna(row.get('rsi14')) else None,
-                atr14=float(row['atr14']) if pd.notna(row.get('atr14')) else None
+                atr14=float(row['atr14']) if pd.notna(row.get('atr14')) else None,
+                rsi_slope=float(row['rsi_slope']) if pd.notna(row.get('rsi_slope')) else None,
+                ema20=float(row['ema20']) if pd.notna(row.get('ema20')) else None,
+                sma50=float(row['sma50']) if pd.notna(row.get('sma50')) else None,
+                sma200=float(row['sma200']) if pd.notna(row.get('sma200')) else None,
+                true_range=float(row['true_range']) if pd.notna(row.get('true_range')) else None,
+                atr_percentage=float(row['atr_percentage']) if pd.notna(row.get('atr_percentage')) else None,
+                volume_ratio=float(row['volume_ratio']) if pd.notna(row.get('volume_ratio')) else None,
+                body_size=float(row['body_size']) if pd.notna(row.get('body_size')) else None,
+                upper_shadow=float(row['upper_shadow']) if pd.notna(row.get('upper_shadow')) else None,
+                lower_shadow=float(row['lower_shadow']) if pd.notna(row.get('lower_shadow')) else None,
+                weekly_range=float(row['weekly_range']) if pd.notna(row.get('weekly_range')) else None
             )
             candles.append(candle)
         

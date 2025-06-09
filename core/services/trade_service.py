@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
+import sqlite3
 
 from core.domain.models import (
     RiskClass, Trade, TradingSignal, TradeManagementDecision, TradeStatus, 
@@ -353,12 +354,32 @@ class TradeService:
                 trade = self.order_manager.execute_signal(signal, risk_amount_usd)
                 
                 if trade:
-                    # Validate and save trade
-                    self.validator.validate_trade(trade)
-                    self.trade_repository.save(trade)
-                    
-                    logger.info(f"Trade executed successfully: {trade.id}")
-                    return trade
+                    # CRITICAL: Use atomic operation to ensure both trade and signal are saved together
+                    try:
+                        with self.trade_repository.atomic_operation() as conn:
+                            # Validate trade
+                            self.validator.validate_trade(trade)
+                            
+                            # Save trade within transaction
+                            self.trade_repository.save_in_transaction(conn, trade)
+                            
+                            # Save associated signal if we have a signal repository
+                            if hasattr(self, 'signal_repository') and self.signal_repository:
+                                self.signal_repository.save_signal_in_transaction(conn, signal)
+                            
+                            # Commit happens automatically on context exit
+                        
+                        logger.info(f"Trade executed and saved successfully: {trade.id}")
+                        return trade
+                    except Exception as e:
+                        # Transaction rolled back automatically
+                        logger.error(f"Failed to save trade {trade.id}: {e}")
+                        # Try to close the position since DB save failed
+                        try:
+                            self.order_manager.close_position(trade)
+                        except Exception as rollback_error:
+                            logger.error(f"Failed to rollback position {trade.ticket}: {rollback_error}")
+                        raise
                 else:
                     logger.error(f"Order manager returned None for {signal.symbol}")
                     return None
@@ -597,6 +618,7 @@ class TradeService:
         
         logger.info(f"Closed {closed_count}/{len(open_trades)} trades")
         return closed_count
+    
 
 
 # Export main service

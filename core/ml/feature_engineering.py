@@ -9,6 +9,9 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Try to import talib, but make it optional
 try:
@@ -256,92 +259,137 @@ class FeatureEngineer:
         return features
     
     def _create_labels(self, data: pd.DataFrame, target: str) -> pd.Series:
-        """Create labels for supervised learning"""
+        """Create labels for supervised learning WITHOUT data leakage
+        
+        CRITICAL FIX: This method now properly creates labels based on PAST outcomes
+        for training. It does NOT peek into the future.
+        """
         if target == 'signal_success':
             # Binary classification: profitable trade or not
+            # FIXED: We now look at past trades and their outcomes
             horizon = self.feature_config['target_horizon']
             threshold = self.feature_config['min_profit_threshold']
             
-            # Calculate future return
-            future_return = data['close'].shift(-horizon) / data['close'] - 1
+            # FIXED: Calculate returns looking BACKWARD
+            # For each point, we look at what happened AFTER trades horizon bars ago
+            # This way, when training on bar N, we use the outcome of a trade from bar N-horizon
+            past_entry_price = data['close'].shift(horizon)
+            exit_price = data['close']
+            historical_return = (exit_price / past_entry_price - 1).fillna(0)
             
-            # Create binary labels
-            labels = (future_return > threshold).astype(int)
+            # Create binary labels based on historical outcomes
+            labels = (historical_return > threshold).astype(int)
+            
+            # CRITICAL: First 'horizon' rows don't have enough history
+            labels.iloc[:horizon] = np.nan
             
         elif target == 'direction':
             # Multi-class: up, down, or sideways
             horizon = self.feature_config['target_horizon']
-            future_return = data['close'].shift(-horizon) / data['close'] - 1
+            # FIXED: Look at historical movements, not future
+            past_entry_price = data['close'].shift(horizon)
+            exit_price = data['close']
+            historical_return = (exit_price / past_entry_price - 1).fillna(0)
             
-            labels = pd.Series(index=data.index, dtype=int)
-            labels[future_return > 0.001] = 1  # Up
-            labels[future_return < -0.001] = -1  # Down
-            labels[(future_return >= -0.001) & (future_return <= 0.001)] = 0  # Sideways
+            labels = pd.Series(index=data.index, dtype=float)  # Use float to support NaN
+            labels[historical_return > 0.001] = 1  # Up
+            labels[historical_return < -0.001] = -1  # Down
+            labels[(historical_return >= -0.001) & (historical_return <= 0.001)] = 0  # Sideways
+            
+            # CRITICAL: First 'horizon' rows don't have enough history
+            labels.iloc[:horizon] = np.nan
             
         elif target == 'optimal_action':
-            # Based on VSA patterns and momentum
-            labels = self._create_vsa_labels(data)
+            # Based on VSA patterns - using ONLY historical confirmed patterns
+            labels = self._create_vsa_labels_no_leakage(data)
         
         else:
             raise ValueError(f"Unknown target: {target}")
         
         return labels
     
-    def _create_vsa_labels(self, data: pd.DataFrame) -> pd.Series:
-        """Create labels based on VSA (Volume Spread Analysis) patterns"""
-        labels = pd.Series(index=data.index, dtype=int)
+    def _create_vsa_labels_no_leakage(self, data: pd.DataFrame) -> pd.Series:
+        """Create labels based on VSA patterns WITHOUT using future data
+        
+        FIXED: This method now properly looks at HISTORICAL pattern outcomes
+        without peeking into the future. For each current bar, we check if
+        a pattern that occurred 'horizon' bars ago was successful.
+        """
+        labels = pd.Series(index=data.index, dtype=float)  # Float to support NaN
+        labels[:] = 0  # Default to no action
         
         # Calculate average volume
         avg_volume = data['volume'].rolling(20).mean()
         
-        # Identify patterns
-        for i in range(20, len(data)):
-            # Current bar
-            close = data['close'].iloc[i]
-            open_price = data['open'].iloc[i]
-            high = data['high'].iloc[i]
-            low = data['low'].iloc[i]
-            volume = data['volume'].iloc[i]
+        # We look back 'horizon' bars to see pattern outcomes
+        horizon = 10
+        
+        # FIXED: Start from horizon + 20 to have enough history
+        for i in range(horizon + 20, len(data)):
+            # Look at a pattern that occurred 'horizon' bars ago
+            pattern_idx = i - horizon
             
-            # Previous bar
-            prev_close = data['close'].iloc[i-1]
-            prev_volume = data['volume'].iloc[i-1]
+            # Historical bar analysis (from horizon bars ago)
+            hist_close = data['close'].iloc[pattern_idx]
+            hist_open = data['open'].iloc[pattern_idx]
+            hist_high = data['high'].iloc[pattern_idx]
+            hist_low = data['low'].iloc[pattern_idx]
+            hist_volume = data['volume'].iloc[pattern_idx]
             
-            # Future price (for labeling)
-            if i + 10 < len(data):
-                future_price = data['close'].iloc[i+10]
-                future_return = (future_price - close) / close
+            # Previous bars (before the historical pattern)
+            hist_prev_close = data['close'].iloc[pattern_idx-1]
+            hist_prev_high = data['high'].iloc[pattern_idx-1]
+            hist_prev_low = data['low'].iloc[pattern_idx-1]
+            
+            # Pattern detection using historical data
+            pattern_detected = 0
+            
+            # Stopping Volume Pattern (potential bullish)
+            if (hist_close < hist_open and  # Down bar
+                hist_volume > avg_volume.iloc[pattern_idx] * 1.5 and  # High volume
+                hist_close > hist_low + (hist_high - hist_low) * 0.3):  # Close in upper 70% of range
+                pattern_detected = 1  # Potential buy
+            
+            # No Supply Pattern (potential bullish)
+            elif (hist_close < hist_prev_close and  # Down from previous
+                  hist_volume < avg_volume.iloc[pattern_idx] * 0.5 and  # Low volume
+                  hist_close > hist_low + (hist_high - hist_low) * 0.5):  # Close in upper half
+                pattern_detected = 1  # Potential buy
+            
+            # Upthrust Pattern (potential bearish)
+            elif (hist_high > data['high'].iloc[pattern_idx-10:pattern_idx].max() and  # New high
+                  hist_close < hist_open and  # But closed down
+                  hist_close < hist_high - (hist_high - hist_low) * 0.3 and  # Close in lower 70%
+                  hist_volume > avg_volume.iloc[pattern_idx]):
+                pattern_detected = -1  # Potential sell
+            
+            # No Demand Pattern (potential bearish)
+            elif (hist_close > hist_prev_close and  # Up from previous
+                  hist_volume < avg_volume.iloc[pattern_idx] * 0.5 and  # Low volume
+                  hist_close < hist_high - (hist_high - hist_low) * 0.5):  # Close in lower half
+                pattern_detected = -1  # Potential sell
+            
+            # Check if the historical pattern was successful
+            if pattern_detected != 0:
+                # Now we can see the actual outcome (current bar vs pattern bar)
+                current_price = data['close'].iloc[i]
+                actual_return = (current_price - hist_close) / hist_close
                 
-                # Stopping Volume Pattern (Bullish)
-                if (close < open_price and  # Down bar
-                    volume > avg_volume.iloc[i] * 1.5 and  # High volume
-                    close > low and  # Close off lows
-                    future_return > 0.002):  # Profitable
-                    labels.iloc[i] = 1
-                
-                # No Supply Pattern (Bullish)
-                elif (close < open_price and  # Down bar
-                      volume < avg_volume.iloc[i] * 0.5 and  # Low volume
-                      future_return > 0.002):
-                    labels.iloc[i] = 1
-                
-                
-                elif (high > data['high'].iloc[i-10:i].max() and  # New high
-                      close < open_price and  # But closed down
-                      volume > avg_volume.iloc[i] and
-                      future_return < -0.002):
-                    labels.iloc[i] = -1
-                
-                # No Demand Pattern (Bearish)
-                elif (close > open_price and  # Up bar
-                      volume < avg_volume.iloc[i] * 0.5 and  # Low volume
-                      future_return < -0.002):
-                    labels.iloc[i] = -1
-                
-                else:
-                    labels.iloc[i] = 0  # No clear pattern
+                # Label based on whether the pattern prediction was correct
+                if pattern_detected == 1 and actual_return > 0.002:
+                    labels.iloc[i] = 1  # Historical bullish pattern was successful
+                elif pattern_detected == -1 and actual_return < -0.002:
+                    labels.iloc[i] = -1  # Historical bearish pattern was successful
+                # else: remains 0 (pattern failed)
+        
+        # Mark first rows without enough history as NaN
+        labels.iloc[:horizon + 20] = np.nan
         
         return labels
+    
+    def _create_vsa_labels(self, data: pd.DataFrame) -> pd.Series:
+        """Legacy method - redirects to non-leaking version"""
+        return self._create_vsa_labels_no_leakage(data)
     
     def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
         """Calculate RSI without TA-Lib"""
@@ -414,3 +462,50 @@ class FeatureEngineer:
             return importance
         else:
             return pd.DataFrame()
+    
+    def create_train_test_split(
+        self,
+        features: pd.DataFrame,
+        labels: pd.Series,
+        test_size: float = 0.2,
+        gap_periods: int = 10
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """
+        Create train/test split with gap to prevent data leakage
+        
+        Args:
+            features: Feature DataFrame
+            labels: Label Series
+            test_size: Proportion of data for testing
+            gap_periods: Number of periods between train and test to prevent leakage
+            
+        Returns:
+            X_train, X_test, y_train, y_test
+        """
+        # Calculate split point
+        n_samples = len(features)
+        test_samples = int(n_samples * test_size)
+        train_samples = n_samples - test_samples - gap_periods
+        
+        if train_samples <= 0:
+            raise ValueError(f"Not enough data for train/test split with gap={gap_periods}")
+        
+        # Split with gap
+        train_end = train_samples
+        test_start = train_end + gap_periods
+        
+        # Create splits
+        X_train = features.iloc[:train_end]
+        y_train = labels.iloc[:train_end]
+        X_test = features.iloc[test_start:]
+        y_test = labels.iloc[test_start:]
+        
+        # Log split information
+        train_dates = f"{X_train.index[0]} to {X_train.index[-1]}"
+        test_dates = f"{X_test.index[0]} to {X_test.index[-1]}"
+        logger.info(f"Train/test split created:")
+        logger.info(f"  Train: {len(X_train)} samples ({train_dates})")
+        logger.info(f"  Gap: {gap_periods} periods")
+        logger.info(f"  Test: {len(X_test)} samples ({test_dates})")
+        
+        return X_train, X_test, y_train, y_test

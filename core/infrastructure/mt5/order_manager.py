@@ -13,11 +13,21 @@ from core.domain.exceptions import (
     MT5OrderError, TradeExecutionError, RiskManagementError,
     ErrorContext, ErrorMessages, InsufficientFundsError
 )
+import MetaTrader5 as mt5
 from core.domain.enums import (
     OrderType, TradeAction, ReturnCode, TradingConstants,
     SymbolConfig, SIGNAL_TO_ORDER_TYPE
 )
 from config.settings import TradingSettings
+from core.utils.enhanced_validation import (
+    TradingValidator, RangeValidator, validate_params
+)
+from core.utils.symbol_resolver import get_symbol_resolver
+from core.utils.retry_utils import (
+    retry_mt5_operation, MT5_ORDER_RETRY_CONFIG, 
+    MT5_MODIFY_RETRY_CONFIG, RetryConfig
+)
+from core.utils.position_lock_manager import get_position_lock_manager
 
 
 logger = logging.getLogger(__name__)
@@ -33,6 +43,8 @@ class MT5OrderManager:
         self.mt5_client = mt5_client
         self.trading_config = trading_config
         self.magic_number = TradingConstants.MAGIC_NUMBER
+        self.symbol_resolver = get_symbol_resolver()
+        self.position_lock_manager = get_position_lock_manager()
     
     def execute_signal(
         self, 
@@ -80,11 +92,16 @@ class MT5OrderManager:
             # Prepare order request
             order_request = self._build_order_request(signal, lot_size)
             
-            # Execute order
-            result = self.mt5_client.send_order(order_request)
+            # Execute order with retry logic
+            result = retry_mt5_operation(
+                self.mt5_client.send_order,
+                order_request,
+                config=MT5_ORDER_RETRY_CONFIG,
+                check_result=lambda r: self.mt5_client.check_order_result(r)
+            )
             
             if not self.mt5_client.check_order_result(result):
-                error_msg = f"Order failed: {result.get('comment', 'Unknown error')}"
+                error_msg = f"Order failed after retries: {result.get('comment', 'Unknown error')}"
                 raise MT5OrderError(error_msg, retcode=result.get('retcode'))
             
             # Create trade object
@@ -135,6 +152,11 @@ class MT5OrderManager:
         
         return risk_amount
     
+    @validate_params(
+        entry=lambda x: TradingValidator.validate_price(x, "GENERIC", "entry"),
+        stop_loss=lambda x: TradingValidator.validate_price(x, "GENERIC", "stop_loss"),
+        risk_amount_usd=lambda x: RangeValidator.validate_positive(x, "risk_amount")
+    )
     def _calculate_lot_size(
         self, 
         symbol: str, 
@@ -144,10 +166,24 @@ class MT5OrderManager:
     ) -> float:
         """Calculate appropriate lot size based on risk parameters"""
         
+        # Resolve symbol name for broker compatibility
+        resolved_symbol = self.symbol_resolver.resolve_and_enable(symbol)
+        if not resolved_symbol:
+            logger.warning(f"Failed to resolve symbol {symbol}, using original name")
+            resolved_symbol = symbol
+        elif resolved_symbol != symbol:
+            logger.info(f"Resolved symbol {symbol} -> {resolved_symbol}")
+            
         # Get symbol information
-        symbol_info = self.mt5_client.get_symbol_info(symbol)
+        symbol_info = self.mt5_client.get_symbol_info(resolved_symbol)
         if not symbol_info:
-            raise TradeExecutionError(f"Cannot get symbol info for {symbol}")
+            raise TradeExecutionError(f"Cannot get symbol info for {resolved_symbol}")
+        
+        # Validate symbol info contains required fields
+        required_fields = ['point', 'trade_contract_size', 'volume_min', 'volume_max', 'volume_step']
+        for field in required_fields:
+            if field not in symbol_info or symbol_info[field] is None:
+                raise TradeExecutionError(f"Missing required field '{field}' in symbol info for {symbol}")
         
         # Get symbol configuration
         symbol_config = SymbolConfig.SYMBOL_SPECIFICATIONS.get(symbol, {})
@@ -156,27 +192,49 @@ class MT5OrderManager:
         point = symbol_info['point']
         contract_size = symbol_info['trade_contract_size']
         
+        # Validate point and contract size
+        if point <= 0 or contract_size <= 0:
+            raise TradeExecutionError(f"Invalid symbol specifications for {symbol}")
+        
         sl_distance = abs(entry - stop_loss)
-        if sl_distance < point * 2:
-            raise RiskManagementError("Stop loss too close to entry price")
+        
+        # Validate stop loss distance with proper minimum
+        min_sl_distance = point * 10  # Minimum 10 points
+        if sl_distance < min_sl_distance:
+            raise RiskManagementError(
+                f"Stop loss too close to entry: {sl_distance/point:.1f} points "
+                f"(minimum {min_sl_distance/point:.1f} points)"
+            )
         
         # Risk per lot in account currency
         risk_per_lot = (sl_distance / point) * (contract_size * point)
         
         # Add spread and commission costs
         spread_pips = self.mt5_client.get_spread(symbol) or 1.0
+        spread_pips = max(0, spread_pips)  # Ensure non-negative
+        
         commission_per_lot = symbol_config.get('commission_per_lot', 0)
+        commission_per_lot = max(0, commission_per_lot)  # Ensure non-negative
         
         spread_cost = spread_pips * (contract_size * point * 10)  # Convert pips to points
         total_cost_per_lot = risk_per_lot + spread_cost + commission_per_lot
         
+        # Validate total cost
+        if total_cost_per_lot <= 0:
+            raise TradeExecutionError(f"Invalid cost calculation for {symbol}")
+        
         # Calculate lot size
         lot_size = risk_amount_usd / total_cost_per_lot
         
-        # Apply symbol constraints
+        # Apply symbol constraints with validation
         min_lot = symbol_info.get('volume_min', TradingConstants.MIN_LOT_SIZE)
         max_lot = symbol_info.get('volume_max', TradingConstants.MAX_LOT_SIZE)
         lot_step = symbol_info.get('volume_step', TradingConstants.LOT_STEP)
+        
+        # Validate lot size with proper method
+        validated_lot_size = TradingValidator.validate_lot_size(
+            lot_size, min_lot, max_lot, lot_step
+        )
         
         # Round to valid lot size
         lot_size = max(min_lot, round(lot_size / lot_step) * lot_step)
@@ -191,10 +249,18 @@ class MT5OrderManager:
     def _build_order_request(self, signal: TradingSignal, lot_size: float) -> Dict[str, Any]:
         """Build MT5 order request from signal"""
     
+        # Resolve symbol name for broker compatibility
+        resolved_symbol = self.symbol_resolver.resolve_and_enable(signal.symbol)
+        if not resolved_symbol:
+            logger.warning(f"Failed to resolve symbol {signal.symbol}, using original name")
+            resolved_symbol = signal.symbol
+        elif resolved_symbol != signal.symbol:
+            logger.info(f"Resolved symbol {signal.symbol} -> {resolved_symbol}")
+            
         # Get current prices with proper error handling
-        tick = self.mt5_client.get_symbol_tick(signal.symbol)
+        tick = self.mt5_client.get_symbol_tick(resolved_symbol)
         if not tick:
-            raise TradeExecutionError(f"Cannot get current price for {signal.symbol}")
+            raise TradeExecutionError(f"Cannot get current price for {resolved_symbol}")
         
         # Validate tick data
         if 'ask' not in tick or 'bid' not in tick:
@@ -222,10 +288,10 @@ class MT5OrderManager:
             if price < signal.entry * 0.99:  # 1% slippage tolerance
                 logger.warning(f"Current price {price} significantly below signal entry {signal.entry}")
         
-        # Build request
+        # Build request with resolved symbol
         request = {
             'action': TradeAction.DEAL,
-            'symbol': signal.symbol,
+            'symbol': resolved_symbol,
             'volume': lot_size,
             'type': order_type,
             'price': price,
@@ -292,26 +358,58 @@ class MT5OrderManager:
             logger.error("Cannot modify trade without ticket number")
             return False
         
-        with ErrorContext("Position modification", symbol=trade.symbol) as ctx:
-            ctx.add_detail("ticket", trade.ticket)
-            ctx.add_detail("new_sl", new_stop_loss)
-            ctx.add_detail("new_tp", new_take_profit)
+        # Use position lock to prevent race conditions
+        with self.position_lock_manager.position_lock(trade.ticket, f"modify_{trade.symbol}"):
+            with ErrorContext("Position modification", symbol=trade.symbol) as ctx:
+                ctx.add_detail("ticket", trade.ticket)
+                ctx.add_detail("new_sl", new_stop_loss)
+                ctx.add_detail("new_tp", new_take_profit)
         
-            # Prepare modification request
-            request = {
-                'action': TradeAction.SLTP,
-                'position': trade.ticket,
-                'symbol': trade.symbol,
-                'sl': new_stop_loss or trade.stop_loss,
-                'tp': new_take_profit or trade.take_profit,
-                'magic': self.magic_number,
-                'comment': "GPT Modification"
-            }
+            def modify_with_checks():
+                # First verify position still exists
+                positions = self.mt5_client.get_positions(symbol=trade.symbol)
+                position_exists = any(p['ticket'] == trade.ticket for p in positions)
+                
+                if not position_exists:
+                    logger.warning(f"Position {trade.ticket} no longer exists")
+                    return {'success': False, 'retcode': 10045}  # Position already closed
+                
+                # Prepare modification request
+                request = {
+                    'action': TradeAction.SLTP,
+                    'position': trade.ticket,
+                    'symbol': trade.symbol,
+                    'sl': new_stop_loss or trade.stop_loss,
+                    'tp': new_take_profit or trade.take_profit,
+                    'magic': self.magic_number,
+                    'comment': "GPT Modification"
+                }
+                
+                # Send modification request
+                result = self.mt5_client.send_order(request)
+                
+                # Handle special cases
+                if hasattr(result, 'retcode'):
+                    if result.retcode == 10025:  # No changes
+                        logger.info("No modification needed - values unchanged")
+                        result.success = True
+                    elif result.retcode == 10016:  # Invalid stops
+                        # Check if position was closed
+                        positions = self.mt5_client.get_positions(symbol=trade.symbol)
+                        if not any(p['ticket'] == trade.ticket for p in positions):
+                            logger.info(f"Position {trade.ticket} closed during modification")
+                            result.success = False
+                
+                return result
             
-            # Send modification request
-            result = self.mt5_client.send_order(request)
+            # Execute with retry logic
+            result = retry_mt5_operation(
+                modify_with_checks,
+                config=MT5_MODIFY_RETRY_CONFIG,
+                check_result=lambda r: r.get('success', False) or self.mt5_client.check_order_result(r)
+            )
             
-            if self.mt5_client.check_order_result(result):
+            if self.mt5_client.check_order_result(result) or result.get('success'):
                 # Update trade object
                 if new_stop_loss:
                     trade.stop_loss = new_stop_loss
@@ -320,9 +418,9 @@ class MT5OrderManager:
                 
                 logger.info(f"Position modified: {trade.symbol} ticket {trade.ticket}")
                 return True
-            else:
-                logger.error(f"Position modification failed: {result}")
-                return False
+            
+            logger.error(f"Position modification failed: {result}")
+            return False
     
     def close_position(self, trade: Trade) -> bool:
         """
@@ -340,62 +438,94 @@ class MT5OrderManager:
         
         with ErrorContext("Position closing", symbol=trade.symbol) as ctx:
             ctx.add_detail("ticket", trade.ticket)
-        
-            # Get current position info
-            positions = self.mt5_client.get_positions(symbol=trade.symbol)
-            position = None
             
-            for pos in positions:
-                if pos['ticket'] == trade.ticket:
-                    position = pos
-                    break
-            
-            if not position:
-                logger.warning(f"Position {trade.ticket} not found, may already be closed")
-                return True
-            
-            # Get current price for closing
-            tick = self.mt5_client.get_symbol_tick(trade.symbol)
-            if not tick:
-                raise TradeExecutionError(f"Cannot get current price for {trade.symbol}")
-            
-            # Determine close parameters
-            if trade.side == SignalType.BUY:
-                close_type = OrderType.SELL
-                close_price = tick['bid']
-            else:
-                close_type = OrderType.BUY
-                close_price = tick['ask']
-            
-            # Prepare close request
-            request = {
-                'action': TradeAction.DEAL,
-                'symbol': trade.symbol,
-                'volume': position['volume'],
-                'type': close_type,
-                'position': trade.ticket,
-                'price': close_price,
-                'deviation': 10,
-                'magic': self.magic_number,
-                'comment': "GPT Close",
-                'type_time': 0,
-                'type_filling': 1
-            }
-            
-            # Execute close order
-            result = self.mt5_client.send_order(request)
-            
-            if self.mt5_client.check_order_result(result):
-                # Update trade status
-                trade.status = TradeStatus.CLOSED
-                trade.exit_price = close_price
-                trade.exit_timestamp = datetime.now(timezone.utc)
+            def close_with_checks():
+                # Get current position info using MT5 directly
+                positions = mt5.positions_get(ticket=trade.ticket)
                 
-                logger.info(f"Position closed: {trade.symbol} ticket {trade.ticket} at {close_price}")
-                return True
-            else:
-                logger.error(f"Position close failed: {result}")
-                return False
+                if not positions:
+                    # Double-check in case position was just closed
+                    if attempt > 0:
+                        logger.info(f"Position {trade.ticket} closed during retry attempt {attempt}")
+                        return True
+                    
+                    # Wait and retry once to handle race condition
+                    time.sleep(0.05)
+                    positions = mt5.positions_get(ticket=trade.ticket)
+                    
+                    if not positions:
+                        logger.warning(f"Position {trade.ticket} not found, may already be closed")
+                        return True
+                        
+                position = positions[0]
+                
+                # Get current price for closing
+                tick = mt5.symbol_info_tick(trade.symbol)
+                if not tick:
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    raise TradeExecutionError(f"Cannot get current price for {trade.symbol}")
+                
+                # Determine close parameters based on position type
+                if position.type == 0:  # BUY position
+                    close_type = mt5.ORDER_TYPE_SELL
+                    close_price = tick.bid
+                else:  # SELL position
+                    close_type = mt5.ORDER_TYPE_BUY
+                    close_price = tick.ask
+                
+                # Prepare close request with current position volume
+                request = {
+                    'action': mt5.TRADE_ACTION_DEAL,
+                    'symbol': trade.symbol,
+                    'volume': position.volume,  # Use actual position volume
+                    'type': close_type,
+                    'position': trade.ticket,
+                    'price': close_price,
+                    'deviation': 20,  # Increased for fast markets
+                    'magic': self.magic_number,
+                    'comment': "GPT Close",
+                    'type_time': mt5.ORDER_TIME_GTC,
+                    'type_filling': mt5.ORDER_FILLING_IOC
+                }
+                
+                # Execute close order
+                result = self.mt5_client.send_order(request)
+                
+                if self.mt5_client.check_order_result(result):
+                    # Update trade status
+                    trade.status = TradeStatus.CLOSED
+                    trade.exit_price = close_price
+                    trade.exit_timestamp = datetime.now(timezone.utc)
+                    
+                    logger.info(f"Position closed: {trade.symbol} ticket {trade.ticket} at {close_price}")
+                    return True
+                else:
+                    # Check specific error codes
+                    if hasattr(result, 'retcode'):
+                        if result.retcode == 10016:  # Invalid stops
+                            # Position might be closing, check again
+                            time.sleep(0.1)
+                            positions = self.mt5_client.get_positions(symbol=trade.symbol)
+                            if not any(p['ticket'] == trade.ticket for p in positions):
+                                logger.info(f"Position {trade.ticket} closed externally")
+                                return True
+                        elif result.retcode == 10006 and attempt < max_retries - 1:
+                            # Request rejected, retry with backoff
+                            time.sleep(retry_delay * (attempt + 1))
+                            continue
+                    
+                    if attempt == max_retries - 1:
+                        logger.error(f"Position close failed after {max_retries} attempts: {result}")
+                        return False
+                
+                # Retry with backoff
+                time.sleep(retry_delay * (attempt + 1))
+            
+            # All retries exhausted
+            logger.error(f"Failed to close position {trade.ticket} after {max_retries} attempts")
+            return False
     
     def get_position_status(self, trade: Trade) -> Optional[Dict[str, Any]]:
         """
@@ -454,6 +584,81 @@ class MT5OrderManager:
             bool: True if position is open
         """
         return self.get_position_status(trade) is not None
+        
+    def close_position_partial(self, trade: Trade, volume_to_close: float) -> bool:
+        """
+        Partially close a position.
+        
+        Args:
+            trade: Trade to partially close
+            volume_to_close: Volume to close
+            
+        Returns:
+            bool: True if partial close successful
+        """
+        if not trade.ticket:
+            logger.error("Cannot close trade without ticket number")
+            return False
+            
+        with ErrorContext("Partial position closing", symbol=trade.symbol) as ctx:
+            ctx.add_detail("ticket", trade.ticket)
+            ctx.add_detail("volume_to_close", volume_to_close)
+            
+            # Get current position info
+            positions = mt5.positions_get(ticket=trade.ticket)
+            if not positions:
+                logger.warning(f"Position {trade.ticket} not found")
+                return False
+                
+            position = positions[0]
+            
+            # Validate volume
+            if volume_to_close > position.volume:
+                logger.error(f"Cannot close {volume_to_close} lots, position only has {position.volume}")
+                return False
+                
+            if volume_to_close < 0.01:
+                logger.error(f"Volume too small: {volume_to_close}")
+                return False
+                
+            # Get current price
+            tick = mt5.symbol_info_tick(trade.symbol)
+            if not tick:
+                raise TradeExecutionError(f"Cannot get current price for {trade.symbol}")
+                
+            # Determine close parameters
+            if position.type == 0:  # BUY position
+                close_type = mt5.ORDER_TYPE_SELL
+                close_price = tick.bid
+            else:  # SELL position
+                close_type = mt5.ORDER_TYPE_BUY
+                close_price = tick.ask
+                
+            # Prepare partial close request
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': trade.symbol,
+                'volume': round(volume_to_close, 2),
+                'type': close_type,
+                'position': trade.ticket,
+                'price': close_price,
+                'deviation': 20,
+                'magic': self.magic_number,
+                'comment': "GPT Partial Close",
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC
+            }
+            
+            # Execute partial close
+            result = mt5.order_send(request)
+            
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Partially closed {volume_to_close} lots of position {trade.ticket}")
+                return True
+            else:
+                error_msg = result.comment if result else "Unknown error"
+                logger.error(f"Partial close failed: {error_msg}")
+                return False
 
 
 # Export main class

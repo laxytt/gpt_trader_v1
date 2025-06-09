@@ -9,13 +9,6 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from core.infrastructure.data.unified_data_provider import DataRequest, UnifiedDataProvider
-try:
-    import talib
-    TALIB_AVAILABLE = True
-except ImportError:
-    TALIB_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning("TA-Lib not available. Using pandas for basic indicators.")
 import numpy as np
 
 from core.infrastructure.mt5.client import MT5Client
@@ -25,6 +18,7 @@ from core.domain.exceptions import (
 )
 from core.domain.enums import MT5TimeFrame, TIMEFRAME_TO_MT5, TimeFrame
 from core.utils.chart_utils import ChartGenerator
+from core.utils.symbol_resolver import get_symbol_resolver
 
 
 logger = logging.getLogger(__name__)
@@ -39,10 +33,15 @@ class MT5DataProvider:
         self.mt5_client = mt5_client
         self.chart_generator = chart_generator
         self.unified_provider = UnifiedDataProvider(mt5_client)
+        self.symbol_resolver = get_symbol_resolver()
         
         # Technical analysis parameters
         self.indicator_warmup_bars = 250  # Bars needed for indicator stability
         self.min_required_bars = 20      # Minimum bars for analysis
+        
+        # Position trading specific parameters
+        self.position_trading_min_daily_bars = 100  # Minimum daily bars for position analysis
+        self.position_trading_min_weekly_bars = 52  # Minimum weekly bars for trend context
     
     async def get_market_data(
         self, 
@@ -68,11 +67,28 @@ class MT5DataProvider:
             InsufficientDataError: If not enough data available
         """
 
+        # Resolve symbol name for broker compatibility
+        resolved_symbol = self.symbol_resolver.resolve_and_enable(symbol)
+        if not resolved_symbol:
+            logger.warning(f"Failed to resolve symbol {symbol}, using original name")
+            resolved_symbol = symbol
+        elif resolved_symbol != symbol:
+            logger.info(f"Resolved symbol {symbol} -> {resolved_symbol}")
+            
+        # Adjust bar count for position trading timeframes
+        adjusted_bars = bars
+        if timeframe == TimeFrame.D1 and bars < self.position_trading_min_daily_bars:
+            logger.info(f"Adjusting daily bars from {bars} to {self.position_trading_min_daily_bars} for position trading")
+            adjusted_bars = self.position_trading_min_daily_bars
+        elif timeframe == TimeFrame.W1 and bars < self.position_trading_min_weekly_bars:
+            logger.info(f"Adjusting weekly bars from {bars} to {self.position_trading_min_weekly_bars} for position trading")
+            adjusted_bars = self.position_trading_min_weekly_bars
+        
         # Create request for recent bars
         request = DataRequest(
-            symbol=symbol,
+            symbol=resolved_symbol,
             timeframe=timeframe,
-            num_bars=bars
+            num_bars=adjusted_bars
         )
         
          # Use unified provider
@@ -104,63 +120,7 @@ class MT5DataProvider:
         
         return df
     
-    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate technical indicators for the DataFrame"""
-        try:
-            if TALIB_AVAILABLE:
-                # Use TA-Lib for better performance and accuracy
-                df['ema50'] = talib.EMA(df['close'].values, timeperiod=50)
-                df['ema200'] = talib.EMA(df['close'].values, timeperiod=200)
-                df['rsi14'] = talib.RSI(df['close'].values, timeperiod=14)
-                df['atr14'] = talib.ATR(
-                    df['high'].values, 
-                    df['low'].values, 
-                    df['close'].values, 
-                    timeperiod=14
-                )
-                df['true_range'] = talib.TRANGE(
-                    df['high'].values,
-                    df['low'].values, 
-                    df['close'].values
-                )
-            else:
-                # Use pandas for basic indicators
-                df['ema50'] = df['close'].ewm(span=50).mean()
-                df['ema200'] = df['close'].ewm(span=200).mean()
-                
-                # Simple RSI calculation
-                delta = df['close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                df['rsi14'] = 100 - (100 / (1 + rs))
-                
-                # Simple ATR calculation
-                high_low = df['high'] - df['low']
-                high_close = np.abs(df['high'] - df['close'].shift())
-                low_close = np.abs(df['low'] - df['close'].shift())
-                ranges = pd.concat([high_low, high_close, low_close], axis=1)
-                true_range = ranges.max(axis=1)
-                df['atr14'] = true_range.rolling(window=14).mean()
-                df['true_range'] = true_range
-            
-            # Common calculations
-            df['rsi_slope'] = df['rsi14'].diff()
-            
-            # Additional indicators for VSA analysis
-            df['sma_volume'] = df['volume'].rolling(window=20).mean()
-            df['volume_ratio'] = df['volume'] / df['sma_volume']
-            
-            # Price range analysis
-            df['body_size'] = abs(df['close'] - df['open'])
-            df['upper_shadow'] = df['high'] - np.maximum(df['open'], df['close'])
-            df['lower_shadow'] = np.minimum(df['open'], df['close']) - df['low']
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"Indicator calculation failed: {e}")
-            raise MT5DataError(f"Technical indicator calculation failed: {str(e)}")
+    # Note: _calculate_indicators method removed as indicators are now calculated in UnifiedDataProvider
     
     def _dataframe_to_candles(self, df: pd.DataFrame) -> List[Candle]:
         """Convert DataFrame to list of Candle objects"""
@@ -181,7 +141,19 @@ class MT5DataProvider:
                 ema200=float(row['ema200']) if pd.notna(row.get('ema200')) else None,
                 rsi14=float(row['rsi14']) if pd.notna(row.get('rsi14')) else None,
                 atr14=float(row['atr14']) if pd.notna(row.get('atr14')) else None,
-                rsi_slope=float(row['rsi_slope']) if pd.notna(row.get('rsi_slope')) else None
+                rsi_slope=float(row['rsi_slope']) if pd.notna(row.get('rsi_slope')) else None,
+                
+                # Additional indicators for position trading
+                ema20=float(row['ema20']) if pd.notna(row.get('ema20')) else None,
+                sma50=float(row['sma50']) if pd.notna(row.get('sma50')) else None,
+                sma200=float(row['sma200']) if pd.notna(row.get('sma200')) else None,
+                true_range=float(row['true_range']) if pd.notna(row.get('true_range')) else None,
+                atr_percentage=float(row['atr_percentage']) if pd.notna(row.get('atr_percentage')) else None,
+                volume_ratio=float(row['volume_ratio']) if pd.notna(row.get('volume_ratio')) else None,
+                body_size=float(row['body_size']) if pd.notna(row.get('body_size')) else None,
+                upper_shadow=float(row['upper_shadow']) if pd.notna(row.get('upper_shadow')) else None,
+                lower_shadow=float(row['lower_shadow']) if pd.notna(row.get('lower_shadow')) else None,
+                weekly_range=float(row['weekly_range']) if pd.notna(row.get('weekly_range')) else None
             )
             candles.append(candle)
         
@@ -300,10 +272,116 @@ class MT5DataProvider:
             bool: True if symbol has sufficient data
         """
         try:
-            market_data = await self.get_market_data(symbol, timeframe, bars=self.min_required_bars)
-            return len(market_data.candles) >= self.min_required_bars
+            # Use appropriate minimum bars based on timeframe
+            min_bars = self.min_required_bars
+            if timeframe == TimeFrame.D1:
+                min_bars = self.position_trading_min_daily_bars
+            elif timeframe == TimeFrame.W1:
+                min_bars = self.position_trading_min_weekly_bars
+                
+            market_data = await self.get_market_data(symbol, timeframe, bars=min_bars)
+            return len(market_data.candles) >= min_bars
         except Exception:
             return False
+    
+    async def get_position_trading_data(
+        self,
+        symbol: str,
+        include_weekly: bool = True
+    ) -> Dict[str, MarketData]:
+        """
+        Get comprehensive data for position trading analysis.
+        
+        Args:
+            symbol: Trading symbol
+            include_weekly: Whether to include weekly timeframe data
+            
+        Returns:
+            Dict with 'daily' and optionally 'weekly' MarketData
+        """
+        result = {}
+        
+        # Get daily data (100+ bars for proper trend analysis)
+        try:
+            daily_data = await self.get_market_data(
+                symbol, 
+                TimeFrame.D1, 
+                bars=self.position_trading_min_daily_bars
+            )
+            result['daily'] = daily_data
+            logger.info(f"Retrieved {len(daily_data.candles)} daily bars for {symbol}")
+        except Exception as e:
+            logger.error(f"Failed to get daily data for {symbol}: {e}")
+            raise
+        
+        # Get weekly data if requested (52+ bars for year-long trend)
+        if include_weekly:
+            try:
+                weekly_data = await self.get_market_data(
+                    symbol,
+                    TimeFrame.W1,
+                    bars=self.position_trading_min_weekly_bars
+                )
+                result['weekly'] = weekly_data
+                logger.info(f"Retrieved {len(weekly_data.candles)} weekly bars for {symbol}")
+            except Exception as e:
+                logger.warning(f"Failed to get weekly data for {symbol}: {e}")
+                # Don't fail if weekly data unavailable, daily is sufficient
+        
+        return result
+    
+    def calculate_position_size_metrics(
+        self, 
+        market_data: MarketData,
+        account_balance: float,
+        risk_percentage: float = 1.0
+    ) -> Dict[str, float]:
+        """
+        Calculate position sizing metrics for longer-term trades.
+        
+        Args:
+            market_data: Market data (preferably daily timeframe)
+            account_balance: Account balance for position sizing
+            risk_percentage: Risk percentage per trade (default 1%)
+            
+        Returns:
+            Dict with position sizing recommendations
+        """
+        if not market_data.candles or len(market_data.candles) < 14:
+            return {}
+        
+        # Get latest ATR and price
+        latest_candle = market_data.candles[-1]
+        current_price = latest_candle.close
+        current_atr = latest_candle.atr14 or 0
+        
+        if current_atr == 0:
+            return {}
+        
+        # Calculate risk amount
+        risk_amount = account_balance * (risk_percentage / 100)
+        
+        # Position sizing based on ATR
+        # For position trading, use 2x ATR for stop loss
+        stop_distance = current_atr * 2
+        position_size = risk_amount / stop_distance
+        
+        # Calculate position value and lots (assuming standard lot = 100,000)
+        position_value = position_size * current_price
+        lots = position_size / 100000
+        
+        return {
+            'current_price': current_price,
+            'current_atr': current_atr,
+            'atr_percentage': (current_atr / current_price) * 100,
+            'suggested_stop_distance': stop_distance,
+            'suggested_stop_price_long': current_price - stop_distance,
+            'suggested_stop_price_short': current_price + stop_distance,
+            'position_size': position_size,
+            'position_value': position_value,
+            'lots': round(lots, 2),
+            'risk_amount': risk_amount
+        }
 
 
 # Export main class

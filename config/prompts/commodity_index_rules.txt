@@ -1,0 +1,101 @@
+## Special Trading Rules for Commodities and Indices
+
+### Commodities Trading Guidelines
+
+#### Energy Commodities (WTIUSD, UKOUSD, NATGAS)
+- **High Volatility**: Expect 2-3x normal forex volatility
+- **News Sensitivity**: Extremely sensitive to:
+  - EIA Crude Oil Inventories (Wednesday 10:30 EST)
+  - OPEC meetings and announcements
+  - Geopolitical events in oil-producing regions
+  - Natural gas storage reports (Thursday 10:30 EST)
+- **Trading Hours**: Most liquid during US session
+- **Risk Management**: Use wider stops (1.5-2x ATR minimum)
+- **Position Sizing**: Reduce position size by 30-50% vs forex
+
+#### Precious Metals (XAUUSD, XAGUSD)
+- **Safe Haven**: Inverse correlation with risk-on sentiment
+- **Key Drivers**:
+  - US Dollar strength (inverse correlation)
+  - Real interest rates (inverse correlation)
+  - Inflation expectations
+  - Geopolitical uncertainty
+- **Best Times**: London/NY overlap for liquidity
+- **Avoid**: During FOMC announcements (extreme volatility)
+
+### Indices Trading Guidelines
+
+#### US Indices (US30, US100, US500)
+- **Trading Hours**: 
+  - Pre-market: 4:00-9:30 EST (lower liquidity)
+  - Regular: 9:30-16:00 EST (best liquidity)
+  - After-hours: 16:00-20:00 EST (wider spreads)
+- **Key Events**:
+  - Market open (9:30 EST) - high volatility
+  - European close (11:30 EST) - potential reversal
+  - Last hour (15:00-16:00 EST) - institutional positioning
+- **Correlations**: 
+  - US30: More defensive, less tech exposure
+  - US100: Tech-heavy, higher volatility
+  - US500: Broad market, most stable
+
+#### European Indices (GER40, UK100, FR40)
+- **Trading Hours**: 
+  - Best: 8:00-16:30 CET
+  - Overlap with US: 15:30-16:30 CET (high volatility)
+- **Key Influences**:
+  - ECB policy (GER40, FR40)
+  - Brexit news (UK100)
+  - European economic data at 10:00 CET
+
+### Risk Adjustments by Instrument Type
+
+#### Position Size Multipliers (vs standard forex)
+- Major Forex Pairs: 1.0x (baseline)
+- Gold/Silver: 0.7x
+- Oil (WTI/Brent): 0.5x
+- Natural Gas: 0.3x (extreme volatility)
+- Major Indices: 0.6x
+- Exotic Forex: 0.4x
+
+#### Stop Loss Guidelines (in ATR multiples)
+- Major Forex: 1.0-1.5x ATR
+- Commodities: 1.5-2.5x ATR
+- Indices: 1.2-2.0x ATR
+- Natural Gas: 2.5-3.0x ATR (wider due to spikes)
+
+### Market-Specific Patterns
+
+#### Commodities
+- **Trend Following**: Commodities trend better than forex
+- **Seasonal Patterns**: 
+  - Natural gas: Higher in winter
+  - Agricultural: Harvest seasons matter
+- **Supply/Demand**: Physical market impacts prices
+- **Dollar Correlation**: Most commodities inversely correlated to USD
+
+#### Indices
+- **Gap Trading**: Common at market open
+- **Momentum**: Strong intraday trends
+- **Sector Rotation**: Watch leading sectors
+- **Options Expiry**: Monthly expiry causes volatility
+
+### Special Considerations
+
+1. **Overnight Risk**:
+   - Indices: Gap risk at open
+   - Commodities: 24-hour markets, weekend gaps
+   - Use guaranteed stops for protection
+
+2. **Leverage Adjustments**:
+   - Reduce leverage for commodities/indices
+   - FTMO max daily loss more likely with volatile instruments
+
+3. **Correlation Risk**:
+   - Don't trade correlated instruments simultaneously
+   - Examples: US30/US500, XAUUSD/XAGUSD, WTIUSD/UKOUSD
+
+4. **News Trading**:
+   - Commodities: Inventory reports cause spikes
+   - Indices: Economic data at market open
+   - Wider "no-trade" window around news (±30 min)

@@ -55,6 +55,73 @@ class HeadTrader(TradingAgent):
         current_price = h1_data.latest_candle.close if h1_data else 0
         symbol = h1_data.symbol if h1_data else "UNKNOWN"
         
+        # CRITICAL: Check for Risk Manager veto power first
+        risk_manager_analysis = next(
+            (a for a in agent_analyses if a.agent_type == AgentType.RISK_MANAGER),
+            None
+        )
+        
+        if risk_manager_analysis:
+            # Risk Manager can veto with WAIT recommendation and high confidence
+            if (risk_manager_analysis.recommendation == SignalType.WAIT and 
+                risk_manager_analysis.confidence >= 80):
+                
+                # Create veto decision
+                veto_decision = AgentAnalysis(
+                    agent_type=AgentType.HEAD_TRADER,
+                    recommendation=SignalType.WAIT,
+                    confidence=risk_manager_analysis.confidence,
+                    reasoning=[
+                        "Risk Manager VETO: Trade rejected due to unacceptable risk",
+                        *risk_manager_analysis.reasoning
+                    ],
+                    concerns=risk_manager_analysis.concerns,
+                    entry_price=None,
+                    stop_loss=None,
+                    take_profit=None,
+                    metadata={'veto': True, 'veto_by': 'risk_manager'}
+                )
+                
+                # Create summary for veto
+                council_summary = {
+                    'vote_summary': self._analyze_votes(agent_analyses),
+                    'debate_insights': {'risk_veto': True},
+                    'dissenting_views': [],
+                    'consensus_level': 100.0,  # Full consensus on risk avoidance
+                    'decision_rationale': veto_decision.reasoning
+                }
+                
+                return veto_decision, council_summary
+            
+            # Also check for explicit high risk in metadata
+            if risk_manager_analysis.metadata and risk_manager_analysis.metadata.get('risk_level') == 'High':
+                
+                veto_decision = AgentAnalysis(
+                    agent_type=AgentType.HEAD_TRADER,
+                    recommendation=SignalType.WAIT,
+                    confidence=90.0,
+                    reasoning=[
+                        "Risk Manager VETO: High risk level detected",
+                        *risk_manager_analysis.concerns
+                    ],
+                    concerns=risk_manager_analysis.concerns,
+                    entry_price=None,
+                    stop_loss=None,
+                    take_profit=None,
+                    metadata={'veto': True, 'veto_by': 'risk_manager', 'risk_level': 'High'}
+                )
+                
+                council_summary = {
+                    'vote_summary': self._analyze_votes(agent_analyses),
+                    'debate_insights': {'risk_veto': True, 'reason': 'high_risk'},
+                    'dissenting_views': [],
+                    'consensus_level': 100.0,
+                    'decision_rationale': veto_decision.reasoning
+                }
+                
+                return veto_decision, council_summary
+        
+        # If no veto, proceed with normal synthesis
         # Analyze votes and confidence
         vote_summary = self._analyze_votes(agent_analyses)
         debate_insights = self._extract_debate_insights(debate_log)
@@ -118,7 +185,9 @@ EXECUTION_NOTES: [specific execution instructions]
         
         response = self.gpt_client.analyze_with_response(
             synthesis_prompt,
-            temperature=0.3  # Low temperature for decisive action
+            temperature=0.3,  # Low temperature for decisive action
+            agent_type=self.agent_type.value,
+            symbol=symbol
         )
         
         # Parse decision

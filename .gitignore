@@ -1,20 +1,58 @@
+# Virtual environments
 .venv/
-
 venv/
 venv_wsl/
 
+# Python cache
 *_pycache_/
-
 *__pycache__/
+*.pyc
+*.pyo
 
+# Environment variables - CRITICAL: Never commit these
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Dashboard authentication - Contains password hashes
+config/.dashboard_auth.json
+
+# Data files
 *.json 
-
 *.jsonl
-
 *.png
-
 *.log
 
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# ML models
+*.pkl
+*.h5
+*.model
+
+# Index files
 vector.index
 
+# Temporary files
 trigger.txt
+*.tmp
+*.temp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.backup
+*.bak
+*~

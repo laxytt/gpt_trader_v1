@@ -24,6 +24,8 @@ from core.utils.error_handling import with_error_recovery
 from config.settings import TradingSettings, MarketAuxSettings
 from core.infrastructure.cache.market_state_cache import MarketStateCache
 from core.services.pre_trade_filter import PreTradeFilter
+from core.services.market_type_detector import get_market_detector
+from config.position_trading_config import PositionTradingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,14 @@ class EnhancedCouncilSignalService:
         # Initialize pre-trade filter
         self.pre_filter = PreTradeFilter(trading_config)
         logger.info("Pre-trade filter initialized")
+        
+        # Initialize market type detector
+        self.market_detector = get_market_detector()
+        logger.info("Market type detector initialized")
+        
+        # Initialize position trading config
+        self.position_config = PositionTradingConfig()
+        self._position_trading_mode = False
     
     async def validate_symbol_readiness(self, symbol: str) -> bool:
         """
@@ -152,17 +162,34 @@ class EnhancedCouncilSignalService:
                     # Get news events for filter
                     news_events = []
                     try:
+                        # Adjust lookahead for position trading (24-48 hours)
+                        lookahead = 48 if self._position_trading_mode else 1
                         news_context = await self.enhanced_news_service.get_enhanced_news_context(
                             symbol=symbol,
-                            lookahead_hours=1,  # Only need near-term news for filter
+                            lookahead_hours=lookahead,
                             lookback_hours=0
                         )
                         news_events = news_context.upcoming_events
                     except Exception as e:
                         logger.debug(f"Could not get news for pre-filter: {e}")
                     
+                    # Adjust pre-trade filter for position trading
+                    if self._position_trading_mode:
+                        # Get appropriate market data for filter
+                        filter_data = market_data.get('d1', market_data.get('h1'))
+                        # Temporarily adjust spread tolerance for position trades
+                        original_spread = getattr(self.pre_filter, 'max_spread_pips', 2.0)
+                        market_config = self.position_config.get_market_config(symbol)
+                        self.pre_filter.max_spread_pips = market_config.get('max_spread_pips', 5.0)
+                    else:
+                        filter_data = market_data.get('h1')
+                    
                     # Run pre-trade filter
-                    filter_result = await self.pre_filter.should_analyze(market_data, news_events)
+                    filter_result = await self.pre_filter.should_analyze(filter_data, news_events)
+                    
+                    # Restore original spread tolerance if adjusted
+                    if self._position_trading_mode and 'original_spread' in locals():
+                        self.pre_filter.max_spread_pips = original_spread
                     
                     if not filter_result.should_analyze:
                         logger.info(f"Pre-filter rejected {symbol}: {filter_result.reason}")
@@ -171,14 +198,20 @@ class EnhancedCouncilSignalService:
                 
                 # Step 1.6: Check cache for similar market conditions
                 if self.cache and not force_generation:
+                    # Adjust cache TTL for position trading (longer validity)
+                    if self._position_trading_mode:
+                        original_ttl = self.cache.ttl_minutes
+                        self.cache.ttl_minutes = 240  # 4 hours for daily signals
+                    
                     # Check if we should skip analysis entirely
-                    should_skip, skip_reason = self.cache.should_skip_analysis(market_data)
+                    cache_data = market_data.get('d1', market_data.get('h1'))
+                    should_skip, skip_reason = self.cache.should_skip_analysis(cache_data)
                     if should_skip:
                         logger.info(f"Skipping analysis for {symbol}: {skip_reason}")
                         return self._create_skip_signal(symbol, skip_reason)
                     
                     # Check for cached decision
-                    cached_result = await self.cache.get_cached_decision(market_data)
+                    cached_result = await self.cache.get_cached_decision(cache_data)
                     if cached_result:
                         cached_signal, cached_council = cached_result
                         logger.info(f"Using cached decision for {symbol}: {cached_signal.signal}")
@@ -186,22 +219,33 @@ class EnhancedCouncilSignalService:
                         # Update signal timestamp and return
                         cached_signal.timestamp = datetime.now(timezone.utc)
                         return cached_signal
+                    
+                    # Restore original TTL if adjusted
+                    if self._position_trading_mode and 'original_ttl' in locals():
+                        self.cache.ttl_minutes = original_ttl
                 
                 # Step 2: Offline validation
                 if self.enable_offline_validation and not force_generation:
-                    # Use validate_market_data method with h1 data
+                    # Use appropriate timeframe for validation
+                    validation_data = market_data.get('d1', market_data.get('h1'))
+                    
+                    # Adjust validation threshold for position trading (higher quality required)
+                    validation_threshold = self.trading_config.offline_validation_threshold
+                    if self._position_trading_mode:
+                        validation_threshold = max(0.7, validation_threshold)  # Minimum 70% for position trades
+                    
                     validation_result = await self.validator.validate_market_data(
-                        market_data['h1'],
-                        min_score_threshold=self.trading_config.offline_validation_threshold
+                        validation_data,
+                        min_score_threshold=validation_threshold
                     )
                     
                     validation_score = validation_result['validation_summary']['weighted_score']
                     ctx.add_detail("validation_score", validation_score)
                     
-                    if validation_score < self.trading_config.offline_validation_threshold:
+                    if validation_score < validation_threshold:
                         logger.debug(
                             f"Signal opportunity below threshold for {symbol}: "
-                            f"{validation_score:.2f} < {self.trading_config.offline_validation_threshold}"
+                            f"{validation_score:.2f} < {validation_threshold}"
                         )
                         return self._create_validation_based_wait_signal(
                             symbol, validation_result
@@ -236,8 +280,38 @@ class EnhancedCouncilSignalService:
                 # Step 6: Format enhanced news for council
                 news_context = enhanced_news_context.to_text_context()
                 
-                # Step 7: Convene the Trading Council
+                # Step 6.5: Get market-specific context
+                market_type, market_config = self.market_detector.detect_market_type(symbol)
+                risk_params = self.market_detector.get_risk_parameters(symbol)
+                
+                # Add position trading context if applicable
+                if self._position_trading_mode:
+                    position_market_config = self.position_config.get_market_config(symbol)
+                    market_config.update({
+                        'position_trading': True,
+                        'stop_loss_atr_multiplier': position_market_config.get('stop_loss_multiplier', 3.5),
+                        'take_profit_atr_multiplier': position_market_config.get('take_profit_multiplier', 10.5),
+                        'min_risk_reward': self.position_config.risk.MIN_RISK_REWARD_RATIO,
+                        'target_holding_days': self.position_config.frequency.TARGET_HOLDING_DAYS,
+                        'partial_profit_levels': self.position_config.exit.PARTIAL_PROFIT_LEVELS,
+                    })
+                    
+                    # Adjust confidence threshold for position trades
+                    self.min_confidence_threshold = max(
+                        self.min_confidence_threshold,
+                        self.position_config.frequency.MIN_CONFIDENCE_SCORE
+                    )
+                
+                # Add market type to ML context
+                ml_context['market_type'] = market_type
+                ml_context['market_config'] = market_config
+                ml_context['risk_params'] = risk_params
+                ml_context['position_trading_mode'] = self._position_trading_mode
+                
+                # Step 7: Convene the Trading Council with market context
                 ctx.add_detail("step", "council_deliberation")
+                ctx.add_detail("market_type", market_type)
+                
                 council_decision = await self.trading_council.convene_council(
                     market_data=market_data,
                     news_context=news_context,
@@ -266,8 +340,9 @@ class EnhancedCouncilSignalService:
                 # Step 11: Cache the decision
                 if self.cache and signal.signal != SignalType.WAIT:
                     confidence = signal.market_context.get('council_confidence', 0) if signal.market_context else 0
+                    cache_data = market_data.get('d1', market_data.get('h1'))
                     self.cache.cache_decision(
-                        market_data=market_data,
+                        market_data=cache_data,
                         signal=signal,
                         council_decision=council_decision.__dict__ if hasattr(council_decision, '__dict__') else {},
                         confidence_score=confidence
@@ -401,21 +476,47 @@ class EnhancedCouncilSignalService:
     async def _get_market_data(self, symbol: str) -> Optional[Dict[str, MarketData]]:
         """Get market data for multiple timeframes"""
         try:
-            # Get data for entry and background timeframes
-            h1_data = await self.data_provider.get_market_data(
-                symbol, TimeFrame.H1, self.trading_config.bars_for_analysis
-            )
-            h4_data = await self.data_provider.get_market_data(
-                symbol, TimeFrame.H4, self.trading_config.bars_for_analysis
-            )
-            
-            if not h1_data or not h4_data:
-                return None
-            
-            return {
-                'h1': h1_data,
-                'h4': h4_data
-            }
+            # Check if we should use position trading timeframes
+            if hasattr(self.trading_config, 'entry_timeframe') and self.trading_config.entry_timeframe in ['D1', 'W1']:
+                self._position_trading_mode = True
+                # Get daily and weekly data for position trading
+                d1_data = await self.data_provider.get_market_data(
+                    symbol, TimeFrame.D1, self.position_config.timeframes.MIN_BARS_DAILY
+                )
+                w1_data = await self.data_provider.get_market_data(
+                    symbol, TimeFrame.W1, self.position_config.timeframes.MIN_BARS_WEEKLY
+                )
+                h4_data = await self.data_provider.get_market_data(
+                    symbol, TimeFrame.H4, self.position_config.timeframes.MIN_BARS_H4
+                )
+                
+                if not d1_data or not w1_data:
+                    return None
+                
+                return {
+                    'd1': d1_data,
+                    'w1': w1_data,
+                    'h4': h4_data,  # For fine-tuning entry
+                    'position_mode': True
+                }
+            else:
+                # Standard intraday trading
+                self._position_trading_mode = False
+                h1_data = await self.data_provider.get_market_data(
+                    symbol, TimeFrame.H1, self.trading_config.bars_for_analysis
+                )
+                h4_data = await self.data_provider.get_market_data(
+                    symbol, TimeFrame.H4, self.trading_config.bars_for_analysis
+                )
+                
+                if not h1_data or not h4_data:
+                    return None
+                
+                return {
+                    'h1': h1_data,
+                    'h4': h4_data,
+                    'position_mode': False
+                }
             
         except Exception as e:
             logger.error(f"Failed to get market data for {symbol}: {e}")

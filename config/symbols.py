@@ -116,7 +116,7 @@ SYMBOL_SPECIFICATIONS: Dict[str, SymbolSpec] = {
         point_multiplier=100
     ),
     
-    # Commodities
+    # Commodities - Precious Metals
     "XAUUSD": SymbolSpec(
         pip_value=0.01,
         min_atr=2.0,
@@ -133,6 +133,37 @@ SYMBOL_SPECIFICATIONS: Dict[str, SymbolSpec] = {
         min_volume=150,
         typical_spread=2.5,
         commission_per_lot=4.5,
+        currencies=("USD",),
+        point_multiplier=1000
+    ),
+    
+    # Commodities - Energy
+    "WTIUSD": SymbolSpec(
+        pip_value=0.01,
+        min_atr=0.50,
+        min_volume=300,
+        typical_spread=3.0,
+        commission_per_lot=6.0,
+        currencies=("USD",),
+        point_multiplier=100
+    ),
+    
+    "UKOUSD": SymbolSpec(
+        pip_value=0.01,
+        min_atr=0.55,
+        min_volume=280,
+        typical_spread=3.5,
+        commission_per_lot=6.0,
+        currencies=("USD",),
+        point_multiplier=100
+    ),
+    
+    "NATGAS": SymbolSpec(
+        pip_value=0.001,
+        min_atr=0.050,
+        min_volume=250,
+        typical_spread=4.0,
+        commission_per_lot=6.5,
         currencies=("USD",),
         point_multiplier=1000
     ),
@@ -213,7 +244,7 @@ SYMBOL_GROUPS = {
     ],
     
     "commodities": [
-        "XAUUSD", "XAGUSD", "WTIUSD", "UKOUSD"
+        "XAUUSD", "XAGUSD", "WTIUSD", "UKOUSD", "NATGAS"
     ],
     
     "us_indices": [
@@ -228,8 +259,17 @@ SYMBOL_GROUPS = {
         "EURUSD", "GBPUSD", "USDCAD", "AUDUSD"
     ],
     
-    "volatile": [
-        "GBPJPY", "EURJPY", "XAUUSD", "US30.cash"
+    "moderate": [
+        "EURJPY", "XAUUSD", "US500.cash", "GER40.cash"
+    ],
+    
+    "aggressive": [
+        "GBPJPY", "NATGAS", "US30.cash", "WTIUSD"
+    ],
+    
+    "ftmo_recommended": [
+        "EURUSD", "GBPUSD", "XAUUSD", "US500.cash", 
+        "GER40.cash", "WTIUSD"
     ],
     
     "beginner_friendly": [

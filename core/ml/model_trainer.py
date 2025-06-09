@@ -3,7 +3,9 @@
 ML model training pipeline integrated with backtesting
 """
 
-from asyncio.log import logger
+import logging
+
+logger = logging.getLogger(__name__)
 import numpy as np
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta

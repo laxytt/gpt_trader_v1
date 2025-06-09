@@ -476,6 +476,7 @@ class ModelEvaluator:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
         
         plt.show()
+        plt.close()  # Close figure to prevent memory leak
     
     def compare_models(
         self,

@@ -16,6 +16,10 @@ from core.domain.exceptions import (
     ErrorContext, ErrorMessages
 )
 from core.domain.enums import ReturnCode, MT5TimeFrame
+from core.utils.circuit_breaker import mt5_circuit_breaker
+from core.utils.enhanced_validation import (
+    StringValidator, validate_params, DataValidator
+)
 
 
 logger = logging.getLogger(__name__)
@@ -38,9 +42,10 @@ class MT5Client:
         """Check if MT5 is currently initialized"""
         return self._is_initialized and mt5.initialize()
     
+    @mt5_circuit_breaker
     def initialize(self) -> bool:
         """
-        Initialize MT5 connection with retry logic.
+        Initialize MT5 connection with retry logic and circuit breaker protection.
         
         Returns:
             bool: True if initialization successful, False otherwise
@@ -81,15 +86,18 @@ class MT5Client:
             self._is_initialized = False
             raise MT5InitializationError(ErrorMessages.MT5_CONNECTION_FAILED)
     
+    @mt5_circuit_breaker
     def shutdown(self):
-        """Properly shutdown MT5 connection"""
+        """Properly shutdown MT5 connection with circuit breaker protection"""
         try:
             if self._is_initialized:
                 mt5.shutdown()
                 self._is_initialized = False
                 logger.info("MT5 connection shutdown")
+        except OSError as e:
+            logger.error(f"System error during MT5 shutdown: {e}")
         except Exception as e:
-            logger.error(f"Error during MT5 shutdown: {e}")
+            logger.error(f"Unexpected error during MT5 shutdown: {type(e).__name__}: {e}")
     
     def ensure_connection(self) -> bool:
         """
@@ -117,9 +125,10 @@ class MT5Client:
             raise
         # Note: We don't shutdown here as other operations might need the connection
     
+    @mt5_circuit_breaker
     def get_account_info(self) -> Optional[Dict[str, Any]]:
         """
-        Get MT5 account information.
+        Get MT5 account information with circuit breaker protection.
         
         Returns:
             Dict with account info or None if failed
@@ -136,9 +145,10 @@ class MT5Client:
             logger.error(f"Failed to get account info: {e}")
             return None
     
+    @mt5_circuit_breaker
     def get_terminal_info(self) -> Optional[Dict[str, Any]]:
         """
-        Get MT5 terminal information.
+        Get MT5 terminal information with circuit breaker protection.
         
         Returns:
             Dict with terminal info or None if failed
@@ -155,12 +165,14 @@ class MT5Client:
             logger.error(f"Failed to get terminal info: {e}")
             return None
     
+    @mt5_circuit_breaker
+    @validate_params(symbol=StringValidator.validate_forex_symbol)
     def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
-        Get symbol information from MT5.
+        Get symbol information from MT5 with circuit breaker protection.
         
         Args:
-            symbol: Trading symbol
+            symbol: Trading symbol (validated)
             
         Returns:
             Dict with symbol info or None if failed
@@ -171,20 +183,28 @@ class MT5Client:
         try:
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info:
-                return symbol_info._asdict()
+                info_dict = symbol_info._asdict()
+                # Validate critical fields exist
+                required_fields = ['bid', 'ask', 'digits', 'trade_contract_size']
+                DataValidator.validate_required_fields(
+                    info_dict, required_fields, f"symbol info for {symbol}"
+                )
+                return info_dict
             else:
-                logger.warning(f"Symbol {symbol} not found")
+                logger.warning(f"Symbol {symbol} not found or not available for trading")
                 return None
         except Exception as e:
             logger.error(f"Failed to get symbol info for {symbol}: {e}")
             return None
     
+    @mt5_circuit_breaker
+    @validate_params(symbol=StringValidator.validate_forex_symbol)
     def get_symbol_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
-        Get latest tick for symbol.
+        Get latest tick for symbol with circuit breaker protection.
         
         Args:
-            symbol: Trading symbol
+            symbol: Trading symbol (validated)
             
         Returns:
             Dict with tick info or None if failed
@@ -195,7 +215,25 @@ class MT5Client:
         try:
             tick = mt5.symbol_info_tick(symbol)
             if tick:
-                return tick._asdict()
+                tick_dict = tick._asdict()
+                # Validate tick data integrity
+                required_fields = ['bid', 'ask', 'time']
+                DataValidator.validate_required_fields(
+                    tick_dict, required_fields, f"tick data for {symbol}"
+                )
+                
+                # Validate bid/ask are positive
+                if tick_dict['bid'] <= 0 or tick_dict['ask'] <= 0:
+                    logger.error(f"Invalid tick prices for {symbol}: bid={tick_dict['bid']}, ask={tick_dict['ask']}")
+                    return None
+                    
+                # Validate spread is reasonable
+                spread = tick_dict['ask'] - tick_dict['bid']
+                if spread < 0:
+                    logger.error(f"Negative spread for {symbol}: {spread}")
+                    return None
+                
+                return tick_dict
             else:
                 logger.warning(f"No tick data for {symbol}")
                 return None
@@ -203,6 +241,7 @@ class MT5Client:
             logger.error(f"Failed to get tick for {symbol}: {e}")
             return None
     
+    @mt5_circuit_breaker
     def copy_rates(
         self, 
         symbol: str, 
@@ -211,7 +250,7 @@ class MT5Client:
         count: int = 100
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        Copy rates from MT5.
+        Copy rates from MT5 with circuit breaker protection.
         
         Args:
             symbol: Trading symbol
@@ -254,9 +293,10 @@ class MT5Client:
             logger.error(f"Failed to copy rates for {symbol}: {e}")
             return None
     
+    @mt5_circuit_breaker
     def get_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Get open positions.
+        Get open positions with circuit breaker protection.
         
         Args:
             symbol: Optional symbol filter
@@ -280,9 +320,10 @@ class MT5Client:
             logger.error(f"Failed to get positions: {e}")
             return []
     
+    @mt5_circuit_breaker
     def get_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Get pending orders.
+        Get pending orders with circuit breaker protection.
         
         Args:
             symbol: Optional symbol filter
@@ -306,9 +347,10 @@ class MT5Client:
             logger.error(f"Failed to get orders: {e}")
             return []
     
+    @mt5_circuit_breaker
     def send_order(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Send trading request to MT5.
+        Send trading request to MT5 with circuit breaker protection.
         
         Args:
             request: Order request dictionary
@@ -317,7 +359,7 @@ class MT5Client:
             Result dictionary with retcode and details
             
         Raises:
-            MT5Error: If order fails
+            MT5Error: If order fails (triggers circuit breaker)
         """
         if not self.ensure_connection():
             raise MT5ConnectionError(ErrorMessages.MT5_CONNECTION_FAILED)
@@ -336,14 +378,20 @@ class MT5Client:
                     
                     if result.retcode == ReturnCode.DONE:
                         logger.info(f"Order successful: {result_dict}")
+                        return result_dict
                     else:
                         logger.error(f"Order failed: {result_dict}")
-                        
-                    return result_dict
+                        # Check for errors that should trigger circuit breaker
+                        if result.retcode in [10004, 10006, 10014, 10016]:
+                            # Requote, Rejected, Invalid volume, Invalid stops
+                            raise MT5Error(f"Critical order error: {result_dict}")
+                        return result_dict
                 else:
                     error = mt5.last_error()
                     raise MT5Error(f"Order send failed: {error}")
                     
+            except MT5Error:
+                raise  # Re-raise to trigger circuit breaker
             except Exception as e:
                 logger.error(f"Order execution error: {e}")
                 raise MT5Error(f"Order execution failed: {str(e)}")
@@ -360,9 +408,10 @@ class MT5Client:
         """
         return result.get('retcode') == ReturnCode.DONE
     
+    @mt5_circuit_breaker
     def get_last_error(self) -> tuple:
         """
-        Get last MT5 error.
+        Get last MT5 error with circuit breaker protection.
         
         Returns:
             Tuple of (error_code, error_description)
@@ -422,10 +471,16 @@ class MT5Client:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit"""
+        """Context manager exit - properly cleanup resources"""
         if exc_type:
             logger.error(f"MT5 context error: {exc_val}")
-        # Don't shutdown automatically - let the application manage this
+        
+        # Properly shutdown MT5 connection
+        try:
+            self.shutdown()
+        except Exception as e:
+            logger.error(f"Error during MT5 shutdown: {e}")
+        
         return False
 
 

@@ -32,15 +32,21 @@ ta
 # Utilities
 requests>=2.31.0
 python-dotenv>=1.0.0
-aiohttp
+aiohttp>=3.9.0
 schedule
 nest_asyncio
+backoff>=2.2.0
 
 # Database
 joblib
+aiosqlite>=0.19.0
 
 # For circuit breakers
 scipy
 
+# For system monitoring
+psutil>=5.9.0
 
-nest_asyncio
+# For news and sentiment
+aiohttp>=3.9.0
+backoff>=2.2.0

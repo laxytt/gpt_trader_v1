@@ -110,6 +110,16 @@ class AgentError(TradingSystemError):
     pass
 
 
+class CouncilDebateError(AgentError):
+    """Raised when council debate process fails"""
+    pass
+
+
+class AgentResponseError(AgentError):
+    """Raised when agent response is invalid or cannot be parsed"""
+    pass
+
+
 # Trading Logic Exceptions
 class TradingError(TradingSystemError):
     """Base exception for trading logic errors"""
@@ -206,6 +216,29 @@ class ServiceError(TradingSystemError):
 class BacktestingError(ServiceError):
     """Raised when backtesting operations fail"""
     pass
+
+
+class AuthenticationError(ServiceError):
+    """Raised when authentication fails"""
+    pass
+
+
+class InitializationError(ServiceError):
+    """Raised when service initialization fails"""
+    pass
+
+
+class ExternalAPIError(ServiceError):
+    """Raised when external API calls fail"""
+    
+    def __init__(self, message: str, api_name: str, status_code: Optional[int] = None, details: Optional[Dict[str, Any]] = None):
+        self.api_name = api_name
+        self.status_code = status_code
+        details = details or {}
+        details['api_name'] = api_name
+        if status_code:
+            details['status_code'] = status_code
+        super().__init__(message, details)
 
 
 class ServiceNotAvailableError(ServiceError):
@@ -363,7 +396,7 @@ __all__ = [
     'GPTError', 'GPTAPIError', 'GPTResponseError', 'SignalGenerationError', 'ReflectionGenerationError',
     
     # Agent exceptions
-    'AgentError',
+    'AgentError', 'CouncilDebateError', 'AgentResponseError',
     
     # Trading exceptions
     'TradingError', 'InvalidSignalError', 'TradeExecutionError', 'TradeManagementError',
@@ -376,7 +409,8 @@ __all__ = [
     'NewsError', 'NewsRestrictionError', 'NewsDataError', 'MarketDataError', 'ChartGenerationError',
     
     # Service exceptions
-    'ServiceError', 'ServiceNotAvailableError', 'TimeoutError', 'NetworkError', 'BacktestingError',
+    'ServiceError', 'ServiceNotAvailableError', 'TimeoutError', 'NetworkError', 'BacktestingError', 'ExternalAPIError',
+    'AuthenticationError', 'InitializationError',
     
     # Notification exceptions
     'NotificationError', 'TelegramError',

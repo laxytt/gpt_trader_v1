@@ -5,13 +5,13 @@ Manages the main trading loop, symbol processing, and system coordination.
 
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 
 from core.domain.models import MarketData, TradingSignal, Trade, SignalType, TradeStatus
 from core.domain.exceptions import (
-    TradingSystemError, ErrorContext, ServiceError, ConfigurationError
+    TradingSystemError, ErrorContext, ServiceError, ConfigurationError, ValidationError
 )
 from core.services.council_signal_service import CouncilSignalService
 from core.services.trade_service import TradeService  
@@ -21,14 +21,23 @@ from core.services.market_service import MarketService
 from core.infrastructure.mt5.client import MT5Client
 from core.utils.validation import validate_symbol_format
 from config.settings import TradingSettings
+from config.position_trading_config import PositionTradingConfig
 from pathlib import Path
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from config.settings import Settings
+    from core.services.health_monitor import HealthMonitor
+    from core.services.position_monitor import PositionMonitor
+
+from core.utils.error_handler import (
+    get_error_handler, ErrorSeverity, ErrorCategory,
+    handle_errors, error_context
+)
+from core.utils.structured_logger import get_logger, log_performance
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class TradingState(Enum):
@@ -100,6 +109,15 @@ class SymbolProcessor:
                     logger.info(f"Managed existing trade for {symbol}: {existing_trade.id}")
                     
                 else:
+                    # Check position trading constraints
+                    if self.orchestrator and self.orchestrator._position_trading_mode:
+                        can_trade, reason = self.orchestrator._check_position_trading_constraints(symbol)
+                        if not can_trade:
+                            result['action_taken'] = 'skipped_constraint'
+                            result['error'] = reason
+                            logger.info(f"Position trading constraint for {symbol}: {reason}")
+                            return result
+                    
                     # Look for new trading opportunity
                     ctx.add_detail("action", "signal_generation")
                     
@@ -148,8 +166,18 @@ class SymbolProcessor:
                 
                 return result
                 
+            except (ValueError, ValidationError) as e:
+                logger.error(f"Symbol validation failed for {symbol}: {e}")
+                result['action_taken'] = 'error'
+                result['error'] = str(e)
+                return result
+            except ServiceError as e:
+                logger.error(f"Service error processing {symbol}: {e}")
+                result['action_taken'] = 'error'
+                result['error'] = str(e)
+                return result
             except Exception as e:
-                logger.error(f"Symbol processing failed for {symbol}: {e}")
+                logger.error(f"Unexpected error processing {symbol}: {e}")
                 result['action_taken'] = 'error'
                 result['error'] = str(e)
                 return result
@@ -271,7 +299,9 @@ class TradingOrchestrator:
         market_service: MarketService,
         mt5_client: MT5Client,
         trading_config: TradingSettings,
-        settings: Optional['Settings'] = None
+        settings: Optional['Settings'] = None,
+        health_monitor: Optional['HealthMonitor'] = None,
+        position_monitor: Optional['PositionMonitor'] = None
     ):
         self.signal_service = signal_service
         self.trade_service = trade_service
@@ -281,10 +311,18 @@ class TradingOrchestrator:
         self.mt5_client = mt5_client
         self.trading_config = trading_config
         self.settings = settings
+        self.health_monitor = health_monitor
+        self.position_monitor = position_monitor
         
         # Initialize components
         self.symbol_processor = SymbolProcessor(signal_service, trade_service, news_service, trading_config, self)
         self.scheduler = TradingScheduler(trading_config)
+        
+        # Position trading configuration
+        self.position_config = PositionTradingConfig()
+        self._position_trading_mode = self._detect_position_trading_mode()
+        self._last_trade_times: Dict[str, datetime] = {}  # Track last trade time per symbol
+        self._last_position_review: Optional[datetime] = None
         
         # System state
         self.state = TradingState.INITIALIZING
@@ -303,7 +341,9 @@ class TradingOrchestrator:
             'trades_executed': 0,
             'trades_managed': 0,
             'errors_encountered': 0,
-            'start_time': None
+            'start_time': None,
+            'position_reviews': 0,
+            'positions_adjusted': 0
         }
     
     
@@ -319,6 +359,14 @@ class TradingOrchestrator:
             self.stats['start_time'] = datetime.now(timezone.utc).isoformat()
             
             while self.state == TradingState.RUNNING and not self._shutdown_requested:
+                # Check for stop file (Windows-friendly graceful shutdown)
+                stop_file = Path("STOP_TRADING")
+                if stop_file.exists():
+                    logger.info("🛑 Stop file detected, initiating graceful shutdown...")
+                    self._shutdown_requested = True
+                    stop_file.unlink()  # Remove the file
+                    break
+                    
                 try:
                     # Check if we should trade now
                     if not self._should_trade_now():
@@ -336,6 +384,11 @@ class TradingOrchestrator:
                     self.state = TradingState.STOPPING
                     break
                     
+                except asyncio.CancelledError:
+                    # Propagate cancellation
+                    raise
+                except (ServiceError, TradingSystemError) as e:
+                    await self._handle_cycle_error(e)
                 except Exception as e:
                     await self._handle_cycle_error(e)
                     
@@ -348,6 +401,11 @@ class TradingOrchestrator:
             
         except KeyboardInterrupt:
             logger.info("🛑 Keyboard interrupt received")
+        except asyncio.CancelledError:
+            logger.info("Trading orchestrator cancelled")
+        except (ServiceError, TradingSystemError) as e:
+            logger.exception(f"💥 Trading system error: {e}")
+            self.state = TradingState.ERROR
         except Exception as e:
             logger.exception(f"💥 Fatal error in trading orchestrator: {e}")
             self.state = TradingState.ERROR
@@ -397,9 +455,15 @@ class TradingOrchestrator:
             
             logger.info("✅ System initialization complete")
             
+        except ConfigurationError:
+            # Re-raise configuration errors as-is
+            raise
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"❌ Network error during initialization: {e}")
+            raise ServiceError(f"Failed to connect to services: {e}") from e
         except Exception as e:
             logger.error(f"❌ System initialization failed: {e}")
-            raise
+            raise ServiceError(f"Initialization failed: {e}") from e
     
     def _validate_configuration(self):
         """Validate system configuration"""
@@ -416,8 +480,15 @@ class TradingOrchestrator:
         for symbol in self.trading_config.symbols:
             try:
                 validate_symbol_format(symbol)
-            except Exception as e:
+            except (ValueError, ValidationError) as e:
                 raise ConfigurationError(f"Invalid symbol {symbol}: {e}")
+    
+    def _detect_position_trading_mode(self) -> bool:
+        """Detect if we're in position trading mode"""
+        # Check if entry timeframe is daily or weekly
+        if hasattr(self.trading_config, 'entry_timeframe'):
+            return self.trading_config.entry_timeframe in ['D1', 'W1']
+        return False
     
     def _should_trade(self, market_data: MarketData) -> bool:
         """Check if current time is good for trading"""
@@ -447,16 +518,58 @@ class TradingOrchestrator:
         logger.info(f"⏸️ Outside trading hours. Waiting {hours}h {minutes}m for next session.")
         await asyncio.sleep(min(3600, wait_time.total_seconds()))  # Sleep max 1 hour at a time
     
+    @log_performance(threshold=5.0, operation="trading_cycle")
     async def _execute_trading_cycle(self):
         """Execute one complete trading cycle"""
         self.cycle_count += 1
         cycle_start = datetime.now(timezone.utc)
         
-        logger.info(f"🔄 Starting trading cycle #{self.cycle_count} at {cycle_start.strftime('%H:%M:%S')}")
+        with logger.context(cycle_number=self.cycle_count, cycle_start=cycle_start.isoformat()):
+            logger.info(f"🔄 Starting trading cycle #{self.cycle_count} at {cycle_start.strftime('%H:%M:%S')}")
         
         try:
+            # Perform health check if available
+            if self.health_monitor and self.cycle_count % 5 == 0:  # Check every 5 cycles
+                try:
+                    health = await self.health_monitor.check_health()
+                    if health.status.value == 'critical':
+                        logger.error(f"🚨 Critical health issues detected: {[m.name for m in health.critical_issues]}")
+                        # Don't trade if system is critical
+                        self.stats['cycles_skipped'] = self.stats.get('cycles_skipped', 0) + 1
+                        return
+                    elif health.warnings:
+                        logger.warning(f"⚠️ Health warnings: {[m.name for m in health.warnings]}")
+                except (ServiceError, asyncio.TimeoutError) as e:
+                    logger.error(f"Health check failed: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error in health check: {e}")
+            
+            # Perform position review if in position trading mode
+            if self._position_trading_mode and self.position_monitor:
+                await self._perform_position_review()
+            
             # Get active symbols (filter by market conditions if needed)
             active_symbols = await self._get_active_symbols()
+            
+            # Apply position trading frequency limits
+            if self._position_trading_mode:
+                active_symbols = self._filter_symbols_by_cooldown(active_symbols)
+            
+            # Fetch real-time news for all active symbols efficiently (if enhanced news service)
+            if hasattr(self.news_service, 'fetch_realtime_market_news'):
+                try:
+                    logger.info("📰 Fetching real-time market news...")
+                    realtime_news = await self.news_service.fetch_realtime_market_news(
+                        symbols=active_symbols,
+                        hours=24,
+                        force_refresh=(self.cycle_count % 10 == 1)  # Force refresh every 10 cycles
+                    )
+                    total_articles = sum(len(articles) for articles in realtime_news.values())
+                    logger.info(f"📰 Retrieved {total_articles} real-time news articles for {len(active_symbols)} symbols")
+                except (ServiceError, asyncio.TimeoutError, ConnectionError) as e:
+                    logger.warning(f"Failed to fetch real-time news: {e}")
+                except Exception as e:
+                    logger.warning(f"Unexpected error fetching news: {e}")
             
             # Get market overview for logging
             try:
@@ -468,8 +581,10 @@ class TradingOrchestrator:
                 logger.info(f"📈 Market Summary - Excellent: {summary['excellent_conditions']}, "
                         f"Good: {summary['good_conditions']}, "
                         f"Avg Score: {summary['average_score']}")
-            except Exception as e:
+            except (ServiceError, asyncio.TimeoutError) as e:
                 logger.warning(f"Failed to get market overview: {e}")
+            except Exception as e:
+                logger.warning(f"Unexpected error getting market overview: {e}")
         
             if not active_symbols:
                 logger.warning("⚠️ No active symbols for trading")
@@ -488,8 +603,14 @@ class TradingOrchestrator:
             self.last_cycle_time = cycle_start
             self.error_count = 0  # Reset error count on successful cycle
             
-        except Exception as e:
+        except asyncio.CancelledError:
+            # Propagate cancellation
+            raise
+        except (ServiceError, TradingSystemError) as e:
             logger.error(f"❌ Trading cycle #{self.cycle_count} failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Unexpected error in trading cycle #{self.cycle_count}: {e}")
             raise
     
     async def _get_active_symbols(self) -> List[str]:
@@ -529,25 +650,44 @@ class TradingOrchestrator:
             logger.info(f"Active symbols based on market conditions: {active_symbols}")
             return active_symbols
             
+        except ServiceError as e:
+            logger.error(f"Service error getting market intelligence: {e}")
+            return self.trading_config.symbols
+        except asyncio.TimeoutError:
+            logger.error("Timeout getting market intelligence, using all configured symbols")
+            return self.trading_config.symbols
         except Exception as e:
-            logger.error(f"Failed to get market intelligence, using all configured symbols: {e}")
+            logger.error(f"Unexpected error getting market intelligence: {e}")
             return self.trading_config.symbols
     
     async def _process_symbols(self, symbols: List[str]) -> List[Dict[str, Any]]:
-        """Process multiple symbols concurrently"""
+        """Process multiple symbols sequentially with production delays"""
         results = []
         
         # Process symbols sequentially to avoid overwhelming the system
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols):
             try:
                 result = await self.symbol_processor.process_symbol(symbol)
                 results.append(result)
                 
-                # Small delay between symbols to be respectful to APIs
-                await asyncio.sleep(1)
+                # Production delay between symbols (not after last symbol)
+                if i < len(symbols) - 1 and self.settings:
+                    delay = self.settings.trading.symbol_processing_delay
+                    logger.info(f"⏳ Waiting {delay}s before processing next symbol...")
+                    await asyncio.sleep(delay)
                 
+            except asyncio.CancelledError:
+                # Propagate cancellation
+                raise
+            except (ServiceError, TradingSystemError) as e:
+                logger.error(f"Service error processing {symbol}: {e}")
+                results.append({
+                    'symbol': symbol,
+                    'action_taken': 'error',
+                    'error': str(e)
+                })
             except Exception as e:
-                logger.error(f"Symbol processing failed for {symbol}: {e}")
+                logger.error(f"Unexpected error processing {symbol}: {e}")
                 results.append({
                     'symbol': symbol,
                     'action_taken': 'error',
@@ -563,6 +703,11 @@ class TradingOrchestrator:
             
             if action == 'trade_executed':
                 self.stats['trades_executed'] += 1
+                # Update last trade time for position trading
+                if self._position_trading_mode:
+                    symbol = result.get('symbol')
+                    if symbol:
+                        self._last_trade_times[symbol] = datetime.now(timezone.utc)
             elif action == 'trade_managed':
                 self.stats['trades_managed'] += 1
             elif action in ['signal_wait', 'trade_executed']:
@@ -591,7 +736,42 @@ class TradingOrchestrator:
     async def _handle_cycle_error(self, error: Exception):
         """Handle errors during trading cycles"""
         self.error_count += 1
-        logger.error(f"❌ Trading cycle error ({self.error_count}/{self.max_errors}): {error}")
+        
+        # Use the error handler for consistent error management
+        error_handler = get_error_handler()
+        
+        # Determine severity based on error count
+        if self.error_count >= self.max_errors - 2:
+            severity = ErrorSeverity.CRITICAL
+        elif self.error_count > self.max_errors // 2:
+            severity = ErrorSeverity.HIGH
+        else:
+            severity = ErrorSeverity.MEDIUM
+        
+        # Determine category based on error type
+        if isinstance(error, ConfigurationError):
+            category = ErrorCategory.CONFIGURATION
+        elif isinstance(error, ValidationError):
+            category = ErrorCategory.VALIDATION
+        elif isinstance(error, (ConnectionError, TimeoutError)):
+            category = ErrorCategory.NETWORK
+        else:
+            category = ErrorCategory.TRADING
+        
+        # Handle the error
+        error_handler.handle_error(
+            error=error,
+            context=f"trading cycle #{self.cycle_count}",
+            severity=severity,
+            category=category,
+            operation="execute_trading_cycle",
+            details={
+                'cycle_count': self.cycle_count,
+                'error_count': self.error_count,
+                'max_errors': self.max_errors
+            },
+            reraise=False  # Don't reraise, we're handling it
+        )
         
         # Exponential backoff on errors
         backoff_time = min(300, 30 * (2 ** min(self.error_count - 1, 3)))
@@ -644,6 +824,14 @@ class TradingOrchestrator:
         
         elapsed = 0
         while elapsed < wait_time and not self._shutdown_requested:
+            # Check for stop file
+            stop_file = Path("STOP_TRADING")
+            if stop_file.exists():
+                logger.info("🛑 Stop file detected during wait, shutting down...")
+                self._shutdown_requested = True
+                stop_file.unlink()
+                break
+                
             await asyncio.sleep(min(check_interval, wait_time - elapsed))
             elapsed += check_interval
     
@@ -669,6 +857,9 @@ class TradingOrchestrator:
             self.state = TradingState.STOPPED
             logger.info("👋 Trading system shutdown complete")
             
+        except asyncio.CancelledError:
+            # Expected during shutdown
+            pass
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
             self.state = TradingState.ERROR
@@ -686,6 +877,9 @@ class TradingOrchestrator:
             logger.info(f"   • Trades executed: {self.stats['trades_executed']}")
             logger.info(f"   • Trades managed: {self.stats['trades_managed']}")
             logger.info(f"   • Errors encountered: {self.stats['errors_encountered']}")
+            if self._position_trading_mode:
+                logger.info(f"   • Position reviews: {self.stats['position_reviews']}")
+                logger.info(f"   • Positions adjusted: {self.stats['positions_adjusted']}")
     
     # Public methods for external control
     
@@ -720,6 +914,89 @@ class TradingOrchestrator:
                 'currently_trading_hours': self.scheduler.is_trading_hours()
             }
         }
+
+
+    def _check_position_trading_constraints(self, symbol: str) -> Tuple[bool, str]:
+        """Check if position trading constraints allow new trade"""
+        # Check minimum time between trades
+        if symbol in self._last_trade_times:
+            hours_since_last = (datetime.now(timezone.utc) - self._last_trade_times[symbol]).total_seconds() / 3600
+            min_hours = self.position_config.frequency.MIN_HOURS_BETWEEN_SAME_SYMBOL
+            if hours_since_last < min_hours:
+                return False, f"Only {hours_since_last:.1f}h since last {symbol} trade (need {min_hours}h)"
+        
+        # Check global minimum time between any trades
+        if self._last_trade_times:
+            last_trade_time = max(self._last_trade_times.values())
+            hours_since_any = (datetime.now(timezone.utc) - last_trade_time).total_seconds() / 3600
+            min_hours_any = self.position_config.frequency.MIN_HOURS_BETWEEN_TRADES
+            if hours_since_any < min_hours_any:
+                return False, f"Only {hours_since_any:.1f}h since last trade (need {min_hours_any}h)"
+        
+        # Check max concurrent positions
+        open_trades = self.trade_service.get_open_trades() if hasattr(self.trade_service, 'get_open_trades') else []
+        if len(open_trades) >= self.position_config.frequency.MAX_CONCURRENT_POSITIONS:
+            return False, f"Maximum {self.position_config.frequency.MAX_CONCURRENT_POSITIONS} concurrent positions reached"
+        
+        # Check session filter
+        current_hour = datetime.now(timezone.utc).hour
+        if not self.position_config.get_session_filter(symbol, current_hour):
+            return False, f"Current hour ({current_hour}) not suitable for {symbol} position trades"
+        
+        return True, "OK"
+    
+    def _filter_symbols_by_cooldown(self, symbols: List[str]) -> List[str]:
+        """Filter symbols based on position trading cooldown periods"""
+        filtered = []
+        current_time = datetime.now(timezone.utc)
+        
+        for symbol in symbols:
+            if symbol in self._last_trade_times:
+                hours_since = (current_time - self._last_trade_times[symbol]).total_seconds() / 3600
+                if hours_since < self.position_config.frequency.MIN_HOURS_BETWEEN_SAME_SYMBOL:
+                    logger.debug(f"Filtering out {symbol} - cooldown period ({hours_since:.1f}h < {self.position_config.frequency.MIN_HOURS_BETWEEN_SAME_SYMBOL}h)")
+                    continue
+            filtered.append(symbol)
+        
+        return filtered
+    
+    async def _perform_position_review(self):
+        """Perform daily position review for position trading"""
+        try:
+            # Check if it's time for review (once per day)
+            current_time = datetime.now(timezone.utc)
+            if self._last_position_review:
+                hours_since_review = (current_time - self._last_position_review).total_seconds() / 3600
+                if hours_since_review < 24:
+                    return
+            
+            logger.info("📊 Performing daily position review...")
+            
+            # Monitor all positions
+            position_health = await self.position_monitor.monitor_all_positions()
+            self.stats['position_reviews'] += 1
+            
+            # Execute recommended adjustments
+            if position_health:
+                adjustments = await self.position_monitor.execute_position_adjustments(position_health)
+                if adjustments:
+                    self.stats['positions_adjusted'] += len(adjustments)
+                    logger.info(f"Executed {len(adjustments)} position adjustments")
+            
+            # Check for time-based exits
+            exits_needed = await self.position_monitor.check_time_based_exits()
+            if exits_needed:
+                logger.warning(f"Time-based exits needed for {len(exits_needed)} positions")
+                # In production, would execute these exits
+            
+            # Generate and log daily review
+            review_report = await self.position_monitor.generate_daily_review()
+            logger.info(f"Daily position review completed\n{review_report}")
+            
+            self._last_position_review = current_time
+            
+        except Exception as e:
+            logger.error(f"Error in position review: {e}")
 
 
 # Export main orchestrator
